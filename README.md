@@ -319,7 +319,7 @@ Drop the file at your repo root and point the two import-based tools at it:
 cp agent-instructions/AGENTS.md ./AGENTS.md     # Codex + Cursor read this directly
 grep -qF '@AGENTS.md' ./CLAUDE.md 2>/dev/null || printf '@AGENTS.md\n' >> ./CLAUDE.md
 ```
-Commit all three. Anyone opening the repo in any of the three tools gets the same
+Commit both. Anyone opening the repo in any of the three tools gets the same
 default.
 
 ### Global scope (default across all your projects)
