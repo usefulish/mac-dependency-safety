@@ -34,22 +34,7 @@ else
   skip "Claude template not found at $SRC_CLAUDE"
 fi
 
-# 0b. Gemini CLI
-SRC_GEMINI="$SCRIPT_DIR/managed-settings/gemini.json"
-DEST_DIR_GEMINI="/Library/Application Support/GeminiCli"
-DEST_GEMINI="$DEST_DIR_GEMINI/settings.json"
-if [[ -f "$SRC_GEMINI" ]]; then
-  echo "  Installing Gemini CLI managed settings..."
-  sudo mkdir -p "$DEST_DIR_GEMINI" \
-    && sudo cp "$SRC_GEMINI" "$DEST_GEMINI" \
-    && sudo chown root:wheel "$DEST_GEMINI" \
-    && sudo chmod 644 "$DEST_GEMINI" \
-    && ok "Gemini CLI: Installed (YOLO mode disabled by system policy)"
-else
-  skip "Gemini template not found at $SRC_GEMINI"
-fi
-
-# 0c. Codex
+# 0b. Codex
 SRC_CODEX="$SCRIPT_DIR/managed-settings/codex.toml"
 DEST_DIR_CODEX="/etc/codex"
 DEST_CODEX="$DEST_DIR_CODEX/requirements.toml"
@@ -115,15 +100,13 @@ fi
 echo "    In Cursor: Agents → Auto-run = Ask every time or Allowlist (sandboxed), not Run everything."
 
 # ---------------------------------------------------------------------------
-say "Layer 0.5: Lock Cursor & Copilot configs (manual chflags)"
+say "Layer 0.5: Lock Cursor config (manual chflags)"
 CURSOR_SETTINGS="$HOME/Library/Application Support/Cursor/User/settings.json"
-COPILOT_CONFIG="$HOME/.copilot/config.json"
 
-echo "  After MCP and agent settings work, lock (README 0e Lock ritual):"
+echo "  After MCP and agent settings work, lock (README 0c/0d Lock ritual):"
 echo "    chflags uchg \"$CURSOR_SETTINGS\""
 [[ -f "$MCP_JSON" ]]  && echo "    chflags uchg \"$MCP_JSON\""
 [[ -f "$MCP_PERMS" ]] && echo "    chflags uchg \"$MCP_PERMS\""
-[[ -f "$COPILOT_CONFIG" ]] && echo "    chflags uchg \"$COPILOT_CONFIG\""
 
 # ---------------------------------------------------------------------------
 say "Layer 1: npm - disable lifecycle scripts globally"
@@ -186,7 +169,6 @@ say "Result"
 command -v npm     >/dev/null 2>&1 && echo "  npm ignore-scripts:       $(npm config get ignore-scripts)"
 command -v python3 >/dev/null 2>&1 && echo "  pip require-virtualenv:   $(python3 -m pip config get global.require-virtualenv 2>/dev/null || echo '(unset)')"
 [[ -f "${DEST_CLAUDE:-}" ]] && echo "  Claude managed settings:  installed" || echo "  Claude managed settings:  NOT installed"
-[[ -f "${DEST_GEMINI:-}" ]] && echo "  Gemini managed settings:  installed" || echo "  Gemini managed settings:  NOT installed"
 [[ -f "${DEST_CODEX:-}" ]]  && echo "  Codex managed settings:   installed" || echo "  Codex managed settings:   NOT installed"
 [[ -f "${MCP_PERMS:-}" ]]   && echo "  Cursor permissions.json:  present" || echo "  Cursor permissions.json:  not present"
 [[ -f "${MCP_JSON:-}" ]]     && echo "  Cursor mcp.json:            present" || echo "  Cursor mcp.json:            not present"

@@ -67,22 +67,6 @@ else
   warn "Claude Code managed settings not found: $CLAUDE_MANAGED"
 fi
 
-GEMINI_MANAGED="/Library/Application Support/GeminiCli/settings.json"
-if [[ -f "$GEMINI_MANAGED" ]]; then
-  if json_valid "$GEMINI_MANAGED"; then
-    pass "Gemini CLI managed settings file exists and is valid JSON"
-  else
-    fail "Gemini CLI managed settings exists but is not valid JSON: $GEMINI_MANAGED"
-  fi
-  if file_contains "$GEMINI_MANAGED" "secureModeEnabled"; then
-    pass "Gemini CLI secure mode control is present"
-  else
-    warn "Gemini CLI managed settings does not mention secureModeEnabled"
-  fi
-else
-  warn "Gemini CLI managed settings not found: $GEMINI_MANAGED"
-fi
-
 CODEX_REQUIREMENTS="/etc/codex/requirements.toml"
 CODEX_OLD_PATH="/etc/codex/codex.toml"
 if [[ -f "$CODEX_REQUIREMENTS" ]]; then
@@ -172,8 +156,7 @@ fi
 say "Layer 0.5: Immutable config files"
 
 CURSOR_SETTINGS="$HOME/Library/Application Support/Cursor/User/settings.json"
-COPILOT_CONFIG="$HOME/.copilot/config.json"
-for protected_file in "$CURSOR_SETTINGS" "$CURSOR_MCP" "$CURSOR_PERMS" "$COPILOT_CONFIG"; do
+for protected_file in "$CURSOR_SETTINGS" "$CURSOR_MCP" "$CURSOR_PERMS"; do
   if [[ -e "$protected_file" ]]; then
     if is_immutable "$protected_file"; then
       pass "Immutable flag set: $protected_file"

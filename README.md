@@ -68,19 +68,7 @@ sudo chown root:wheel "/Library/Application Support/ClaudeCode/managed-settings.
 sudo chmod 644        "/Library/Application Support/ClaudeCode/managed-settings.json"
 ```
 
-### 0b. Gemini CLI
-File: `/Library/Application Support/GeminiCli/settings.json`
-(template: [`managed-settings/gemini.json`](./managed-settings/gemini.json))
-
-Install by hand:
-```bash
-sudo mkdir -p "/Library/Application Support/GeminiCli"
-sudo cp managed-settings/gemini.json "/Library/Application Support/GeminiCli/settings.json"
-sudo chown root:wheel "/Library/Application Support/GeminiCli/settings.json"
-sudo chmod 644        "/Library/Application Support/GeminiCli/settings.json"
-```
-
-### 0c. Codex
+### 0b. Codex
 File: `/etc/codex/requirements.toml`
 (template: [`managed-settings/codex.toml`](./managed-settings/codex.toml))
 
@@ -92,23 +80,24 @@ sudo chown root:wheel "/etc/codex/requirements.toml"
 sudo chmod 644        "/etc/codex/requirements.toml"
 ```
 
-### 0d. Cursor & Copilot (The "Hard Floor")
-Many tools (Cursor, Copilot CLI) store settings in user-writable JSON files. A
-malicious `postinstall` script can simply `sed` these files to enable bypass
-modes. To prevent this, set your preferred safety defaults and then make the
-config file **immutable** (see **Lock ritual** in 0e for the full file list).
+### 0c. Cursor settings (a speed bump, not a wall)
+Cursor stores its settings in user-writable JSON files. A malicious `postinstall`
+script can `sed` these to enable bypass modes. Setting your safety defaults and
+then making the file **immutable** raises the bar — but be honest about how high.
 
 ```bash
-# Example: Lock Cursor settings
+# Lock Cursor settings (see Lock ritual in 0d for the full file list)
 chflags uchg "$HOME/Library/Application Support/Cursor/User/settings.json"
-
-# Example: Lock Copilot CLI config
-chflags uchg "$HOME/.copilot/config.json"
 ```
-*Note: You must run `chflags nouchg <file>` to unlock it before you can make
+*`chflags uchg` is the **user** immutable flag: its owner can clear it without
+root (`chflags nouchg <file>`), so a targeted payload running as you can unset
+it, edit, and re-set it. This stops unsophisticated scripts that blindly `sed`,
+not a determined attacker. Contrast with 0a/0b above, whose root-owned files a
+non-root process genuinely cannot touch — those are the real walls; this is a
+speed bump. You must also run `chflags nouchg <file>` to unlock before making
 legitimate changes.*
 
-### 0e. Cursor MCP (friction without enterprise MDM)
+### 0d. Cursor MCP (friction without enterprise MDM)
 
 MCP servers are install-time-equivalent risk: each one is a long-lived process
 that can read files, call APIs, and run shell commands as you. Unlike Claude
@@ -124,7 +113,7 @@ edit.
 2. **Settings → Tools & MCP:** disable servers you do not use (toggle off, do not
    delete — easy to turn back on).
 
-#### 0e-1. MCP auto-run allowlist (small on purpose)
+#### 0d-1. MCP auto-run allowlist (small on purpose)
 
 File: `~/.cursor/permissions.json`
 (template: [`managed-settings/cursor-permissions.json`](./managed-settings/cursor-permissions.json))
@@ -142,7 +131,7 @@ cp managed-settings/cursor-permissions.json "$HOME/.cursor/permissions.json"
 
 Loosen: remove entries from `mcpAllowlist`, or delete the file.
 
-#### 0e-2. Global MCP servers (pinned)
+#### 0d-2. Global MCP servers (pinned)
 
 File: `~/.cursor/mcp.json`
 (example: [`managed-settings/mcp.json.example`](./managed-settings/mcp.json.example))
@@ -165,7 +154,7 @@ entries with the same server name. Do not open untrusted repos with Agent enable
 if the repo ships its own `.cursor/mcp.json` — treat that like a dependency you
 did not review.
 
-#### 0e-3. Optional deny hook (secret paths + @latest)
+#### 0d-3. Optional deny hook (secret paths + @latest)
 
 Hooks can **deny** risky MCP calls; they cannot grant auto-approval. Templates:
 
@@ -187,7 +176,7 @@ the template instead of overwriting.
 
 #### Lock ritual (after you are happy with the files)
 
-Unlock → edit → restart Cursor → verify → lock. Same idea as 0d; includes MCP files.
+Unlock → edit → restart Cursor → verify → lock. Same idea as 0c; includes MCP files.
 
 ```bash
 CURSOR_SETTINGS="$HOME/Library/Application Support/Cursor/User/settings.json"
@@ -308,8 +297,8 @@ allowlist.
 ## Layer 4 — Agent defaults (soft)
 
 A shared instruction file that nudges AI coding agents (Claude Code, Cursor,
-Gemini CLI, Codex) toward the Layer 1 lockfile hygiene (`npm ci` by default,
-`npm install <pkg>` only to add/bump) and Layer 0e MCP hygiene (no new servers
+Codex) toward the Layer 1 lockfile hygiene (`npm ci` by default,
+`npm install <pkg>` only to add/bump) and Layer 0d MCP hygiene (no new servers
 unless asked).
 
 > **Softest layer in the repo — a default, not a control.** Agents usually follow
@@ -318,10 +307,10 @@ unless asked).
 > with the agent and asks nicely. Don't mistake one for the other. This is a
 > sibling to Layer 1's npm guidance, not to Layer 0's enforcement.
 
-One file, four tools. `AGENTS.md` is read natively by Codex and Cursor; Claude
-Code and Gemini CLI pull it in via their `@import` syntax. Write the rule once
+One file, three tools. `AGENTS.md` is read natively by Codex and Cursor; Claude
+Code pulls it in via its `@import` syntax. Write the rule once
 (template: [`agent-instructions/AGENTS.md`](./agent-instructions/AGENTS.md)),
-import it everywhere — no four-way drift.
+import it everywhere — no three-way drift.
 
 ### Project scope (per repo — the clean case)
 
@@ -329,9 +318,8 @@ Drop the file at your repo root and point the two import-based tools at it:
 ```bash
 cp agent-instructions/AGENTS.md ./AGENTS.md     # Codex + Cursor read this directly
 grep -qF '@AGENTS.md' ./CLAUDE.md 2>/dev/null || printf '@AGENTS.md\n' >> ./CLAUDE.md
-grep -qF '@AGENTS.md' ./GEMINI.md 2>/dev/null || printf '@AGENTS.md\n' >> ./GEMINI.md
 ```
-Commit all three. Anyone opening the repo in any of the four tools gets the same
+Commit all three. Anyone opening the repo in any of the three tools gets the same
 default.
 
 ### Global scope (default across all your projects)
@@ -345,14 +333,13 @@ AGENTS="$HOME/.config/agent-instructions/AGENTS.md"
 ln -sf "$AGENTS" ~/.codex/AGENTS.md              # Codex reads it natively
 # Append once — re-running duplicates the import line. Check the file first:
 grep -qF "@$AGENTS" ~/.claude/CLAUDE.md 2>/dev/null || printf '@%s\n' "$AGENTS" >> ~/.claude/CLAUDE.md
-grep -qF "@$AGENTS" ~/.gemini/GEMINI.md 2>/dev/null || printf '@%s\n' "$AGENTS" >> ~/.gemini/GEMINI.md
 ```
 **Cursor is the holdout:** its global rules live in Settings → Rules (a UI field,
 not a file), so paste the rule there by hand. It's five lines.
 
 > Formats drift and not every version's `@import` takes an absolute path. If an
 > import doesn't resolve, symlink the tool's file to the canonical one or just
-> paste the five lines in — then confirm it actually loaded (Claude Code & Gemini:
+> paste the five lines in — then confirm it actually loaded (Claude Code:
 > `/memory`; Codex: it echoes the instruction files it read on start).
 
 Loosen: delete the stub/import line, or the rule block inside `AGENTS.md`.
@@ -373,7 +360,7 @@ After you've read [`harden-deps.sh`](./harden-deps.sh) and the
 [`managed-settings/`](./managed-settings/) templates it may install:
 ```bash
 less harden-deps.sh        # actually read it
-bash harden-deps.sh        # applies Layers 0–0e and 1–3; prompts for sudo once
+bash harden-deps.sh        # applies Layers 0a-0d and 1-3; prompts for sudo once
 ```
 Layer 4 (`AGENTS.md`) is manual — project or global install per section above.
 It guards each tool behind a presence check, won't clobber an existing
