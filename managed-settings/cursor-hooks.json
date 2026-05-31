@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeMCPExecution": [
+      {
+        "command": "./hooks/deny-risky-mcp.sh",
+        "failClosed": false
+      }
+    ]
+  }
+}

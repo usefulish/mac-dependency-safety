@@ -1,0 +1,19 @@
+[requirements]
+disallow_sandbox_modes = ["danger-full-access"]
+disallow_approval_policies = ["never"]
+
+[permissions.default.filesystem]
+"~/.ssh" = "deny"
+"~/.aws" = "deny"
+"~/.config/gcloud" = "deny"
+"~/.config/gh" = "deny"
+"~/.npmrc" = "deny"
+"~/.netrc" = "deny"
+"~/.git-credentials" = "deny"
+"~/.docker/config.json" = "deny"
+"~/.kube/config" = "deny"
+
+[permissions.project-edit.filesystem.":workspace_roots"]
+"**/.env" = "deny"
+"**/.env.*" = "deny"
+"**/.npmrc" = "deny"
