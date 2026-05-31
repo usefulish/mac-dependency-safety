@@ -4,6 +4,12 @@ Opinionated, macOS-only hardening to reduce the blast radius of installing
 untrusted packages (npm / pip / Homebrew) and to stop malware from weaponizing
 your local AI coding agents.
 
+This is a pragmatic **something rather than nothing** baseline for macOS
+developers, especially people moving quickly with AI coding agents. It blocks
+the easiest install-script and agent-bypass failure modes, makes risky
+dependency changes more visible, and adds friction around common secret paths.
+It is not a sandbox and does not make untrusted packages safe.
+
 > **Read this before running anything here.** This repo exists because package
 > managers run arbitrary code as you at install time. Piping a stranger's setup
 > script into your shell to defend against *that* is self-defeating. So: the
@@ -19,6 +25,15 @@ reach. The only thing that truly *contains* a bad package is installing it
 where there's nothing to steal (a throwaway container). Treat these settings as
 the everyday guard that catches careless mistakes, and a container as the
 seatbelt for installs you don't trust.
+
+Things this does **not** protect against:
+
+- Malicious code you deliberately run outside these defaults.
+- Packages that execute through non-npm-script build paths.
+- Browser/session-cookie theft, malicious editor extensions, shell profile
+  tampering, or secrets already loaded into environment variables.
+- Tool config drift. AI CLI and editor policy formats change; verify after
+  installing and after upgrading tools.
 
 Scope: **macOS only.** Tested against **Claude Code v2.1.x** — these settings
 drift, so check the [Claude Code docs](https://code.claude.com/docs/en/permission-modes)
@@ -364,6 +379,18 @@ Layer 4 (`AGENTS.md`) is manual — project or global install per section above.
 It guards each tool behind a presence check, won't clobber an existing
 `~/Brewfile` or existing `~/.cursor/mcp.json`, tags every loosenable line with
 `# LOOSEN:`, and prints final state. Nothing in it isn't in this README.
+
+## Verify the install
+
+After installing, run the read-only verification:
+```bash
+bash verify-install.sh
+```
+
+This checks that the expected safety settings are installed, confirms that Codex
+dangerous bypass requests are constrained, and points out anything still worth
+reviewing. Treat warnings as a review queue, not automatic failure; some tools
+may simply not be installed on your machine.
 
 ## License
 
