@@ -1,0 +1,61 @@
+name: Monthly threat baseline review
+
+on:
+  schedule:
+    # First day of each month at 14:00 UTC.
+    - cron: "0 14 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  open-review-issue:
+    name: Open review issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create monthly review issue if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          month="$(date -u +%Y-%m)"
+          title="Monthly dependency-safety threat review: ${month}"
+
+          existing="$(
+            gh issue list \
+              --repo "$GH_REPO" \
+              --state open \
+              --search "\"$title\" in:title" \
+              --json number \
+              --jq '.[0].number // empty'
+          )"
+
+          if [[ -n "$existing" ]]; then
+            echo "Review issue already exists: #$existing"
+            exit 0
+          fi
+
+          body="$(mktemp)"
+          cat >"$body" <<EOF
+          Monthly reminder to check whether this repo's baseline still covers the obvious current risks.
+
+          Checklist:
+
+          - [ ] Run \`bash verify-install.sh\` on a real Mac and note any drift.
+          - [ ] Review recent npm supply-chain incidents: lifecycle scripts, native build paths, dependency confusion, maintainer token theft, provenance/trusted publishing changes.
+          - [ ] Review recent PyPI incidents: source-distribution execution, dependency confusion, upload-token theft, trusted publishing/attestation changes.
+          - [ ] Review recent Homebrew/macOS installer risks: third-party taps, cask/pkg root execution, fake Homebrew/install-command pages.
+          - [ ] Review AI coding-agent and MCP changes: bypass flags, managed settings formats, auto-run/tool allowlists, secret path controls.
+          - [ ] Update README, templates, verifier, agent instructions, and CHANGELOG only for changes that keep this a sane baseline.
+
+          Keep the bar pragmatic: no auto-edits, no broad framework, just current low-friction controls and clear caveats.
+          EOF
+
+          gh issue create \
+            --repo "$GH_REPO" \
+            --title "$title" \
+            --body-file "$body"

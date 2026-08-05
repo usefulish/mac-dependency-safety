@@ -49,6 +49,24 @@ json_valid() {
   python3 -m json.tool "$file" >/dev/null 2>&1
 }
 
+cursor_hook_fail_closed() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+  python3 - "$file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+hooks = data.get("hooks", {}).get("beforeMCPExecution", [])
+for hook in hooks:
+    if hook.get("command") == "./hooks/deny-risky-mcp.sh":
+        sys.exit(0 if hook.get("failClosed") is True else 2)
+sys.exit(1)
+PY
+}
+
 say "Layer 0: AI agent managed settings"
 
 CLAUDE_MANAGED="/Library/Application Support/ClaudeCode/managed-settings.json"
@@ -151,6 +169,22 @@ if [[ -x "$CURSOR_HOOK" ]]; then
   fi
 else
   warn "Cursor deny-risky-mcp hook not executable: $CURSOR_HOOK"
+fi
+
+CURSOR_HOOKS_JSON="$HOME/.cursor/hooks.json"
+if [[ -f "$CURSOR_HOOKS_JSON" ]]; then
+  if json_valid "$CURSOR_HOOKS_JSON"; then
+    pass "Cursor hooks.json exists and is valid JSON"
+    if cursor_hook_fail_closed "$CURSOR_HOOKS_JSON"; then
+      pass "Cursor deny-risky-mcp hook is configured fail-closed"
+    else
+      warn "Cursor deny-risky-mcp hook is missing or not fail-closed in hooks.json"
+    fi
+  else
+    fail "Cursor hooks.json exists but is not valid JSON: $CURSOR_HOOKS_JSON"
+  fi
+else
+  warn "Cursor hooks.json not found: $CURSOR_HOOKS_JSON"
 fi
 
 say "Layer 0.5: Immutable config files"

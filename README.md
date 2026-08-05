@@ -29,7 +29,8 @@ seatbelt for installs you don't trust.
 Things this does **not** protect against:
 
 - Malicious code you deliberately run outside these defaults.
-- Packages that execute through non-npm-script build paths.
+- Packages that execute through non-npm-script build paths (native build files,
+  extension hooks, compiler plugins, test hooks, etc.).
 - Browser/session-cookie theft, malicious editor extensions, shell profile
   tampering, or secrets already loaded into environment variables.
 - Tool config drift. AI CLI and editor policy formats change; verify after
@@ -174,6 +175,10 @@ cp managed-settings/cursor-hooks.json "$HOME/.cursor/hooks.json"
 If you already have `~/.cursor/hooks.json`, add the `beforeMCPExecution` block from
 the template instead of overwriting.
 
+The template uses `"failClosed": true`, so a broken or missing hook blocks the MCP
+call instead of silently allowing it. Loosen to `false` only if the hook proves
+too disruptive for your normal workflow.
+
 #### Lock ritual (after you are happy with the files)
 
 Unlock → edit → restart Cursor → verify → lock. Same idea as 0c; includes MCP files.
@@ -211,6 +216,15 @@ npx puppeteer browsers install chrome   # e.g. puppeteer's chromium download
 npm rebuild <pkg>                        # native modules (sharp, better-sqlite3)
 npx can-i-ignore-scripts                 # audit which deps actually need scripts
 ```
+
+Watch for native build paths. Packages with native components (`binding.gyp` /
+`node-gyp`) can get install-time execution without an obvious `preinstall` or
+`postinstall` script in `package.json`, especially when script blocking is
+loosened for a build-on-install dependency. Treat unexpected native builds in a
+new dependency as high-risk: read the tarball, prefer a known-good locked
+version, or install it in a throwaway container. This is why the ceiling at the
+bottom is still "isolate what you don't trust", not "set one npm flag".
+
 Cooldown (bad versions are usually pulled within hours/days):
 ```bash
 npm install <pkg> --before="$(date -v-7d +%Y-%m-%d)"   # version as of a week ago
@@ -232,6 +246,25 @@ Pairs with the cooldown above: the lockfile guards the gap *between* updates,
 the `--before` window guards the *moment* you update. Neither neuters a payload
 that already landed — that's what `ignore-scripts` is for. Three cheap layers,
 different points in the chain.
+
+Private/internal packages: use scoped names and explicit private registry
+routing. Dependency-confusion attacks publish public packages with names or
+inflated versions that beat an intended internal package. Do not rely on "this
+name only exists inside our company" as a control.
+
+If you publish npm packages, remove long-lived publish tokens where you can:
+use npm Trusted Publishing/OIDC, require 2FA, consider staged publishing for CI
+releases, and keep any install-only token read-only. This does not protect you
+from installing a malicious dependency, but it reduces the chance that your
+machine or CI runner becomes the next publisher in the chain.
+
+Provenance is useful review signal, not a trust guarantee:
+```bash
+npm audit signatures
+```
+Run it after `npm ci` when you want to verify registry signatures/provenance for
+the resolved tree. A valid attestation says where a package came from; it does
+not say the package is safe.
 
 Loosen: `npm config delete ignore-scripts`
 
@@ -258,6 +291,10 @@ Pin real dependencies with hashes so a package can't silently swap versions:
 ```bash
 pip install --require-hashes -r requirements.txt   # lockfile via pip-compile or uv
 ```
+If you publish Python packages, prefer PyPI Trusted Publishing and attestations
+over long-lived upload tokens. Treat attestations the same way as npm
+provenance: useful for origin/tamper review, not proof that the code is benign.
+
 Also: never `sudo pip`.
 
 Loosen: `python3 -m pip config unset global.require-virtualenv`
@@ -273,6 +310,9 @@ ignore-scripts equivalent; the lever is *source trust*.
 
 - Stick to `homebrew/core` and `homebrew/cask` — reviewed, CI'd, PR process.
 - Treat any third-party `brew tap` like a random npm package: unreviewed code.
+- Install Homebrew itself only from `brew.sh` or the official Homebrew GitHub
+  org. Sponsored search results and lookalike "fix your install" pages are a
+  separate malware delivery path.
 - Extra scrutiny for casks installing `.pkg` (root execution).
 - Inspect before installing from an untrusted tap:
   ```bash
@@ -378,6 +418,29 @@ This checks that the expected safety settings are installed, confirms that Codex
 dangerous bypass requests are constrained, and points out anything still worth
 reviewing. Treat warnings as a review queue, not automatic failure; some tools
 may simply not be installed on your machine.
+
+## Monthly review reminder
+
+The repo includes a GitHub Actions workflow that opens one issue on the first
+day of each month:
+
+```text
+.github/workflows/monthly-threat-review.yml
+```
+
+It does not scan the internet or edit files. It creates a checklist issue so a
+human can review current npm, PyPI, Homebrew, AI-agent, and MCP risks, then make
+only the updates that still fit this repo's "sane baseline" scope. You can also
+run it manually from GitHub: **Actions → Monthly threat baseline review → Run
+workflow**.
+
+GitHub only runs scheduled workflows from the default branch, and the repository
+must have Issues enabled. If your repo or organization restricts the default
+`GITHUB_TOKEN` to read-only, allow Actions to create issues in repository
+settings.
+
+To change the cadence, edit the `cron` line in that workflow. GitHub schedules
+use UTC.
 
 ## License
 

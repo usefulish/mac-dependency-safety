@@ -4,7 +4,7 @@
     "beforeMCPExecution": [
       {
         "command": "./hooks/deny-risky-mcp.sh",
-        "failClosed": false
+        "failClosed": true
       }
     ]
   }
