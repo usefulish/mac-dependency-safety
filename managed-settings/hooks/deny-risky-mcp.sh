@@ -37,18 +37,23 @@ url = str(data.get("url", "") or "")
 blob = "\n".join((tool_name, tool_input, command, url))
 
 secret_patterns = [
-    (r"(?i)(?:^|[/\\])\.env(?:\.|$|[/\\])", ".env files"),
-    (r"(?i)\.ssh(?:/|$)", "SSH directory"),
+    # boundaries accept whitespace as well as slashes: paths arrive embedded in
+    # command strings ("read .env", "cat ~/.env secrets"), not just as bare paths
+    (r"(?i)(?:^|[\s/\\])\.env(?:[.\s/\\]|$)", ".env files"),
+    (r"(?i)\.ssh(?:[\s/\\]|$)", "SSH directory"),
     (r"(?i)git-credentials", "git credentials"),
     (r"(?i)\.npmrc", "npm config"),
     (r"(?i)\.netrc", "netrc"),
     (r"(?i)kube/config", "kubeconfig"),
     (r"(?i)docker/config\.json", "Docker config"),
-    (r"(?i)(?:^|[/\\])\.aws(?:/|$)", "AWS credentials"),
+    (r"(?i)(?:^|[\s/\\])\.aws(?:[\s/\\]|$)", "AWS credentials"),
     (r"(?i)gcloud", "gcloud config"),
 ]
+# blob joins the JSON fields with newlines, so the $ alternatives in the
+# patterns above only ever match the final field without MULTILINE — ".env"
+# or ".ssh" at the end of tool_input slipped through when command/url followed.
 for pattern, label in secret_patterns:
-    if re.search(pattern, blob):
+    if re.search(pattern, blob, re.MULTILINE):
         deny(
             f"Blocked MCP call targeting {label} (mac-dependency-safety hook).",
             f"MCP tool blocked: arguments appear to reference {label}. "

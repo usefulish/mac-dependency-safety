@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix the Cursor MCP deny hook missing secret paths embedded in command strings: the `.env`/`.ssh`/`.aws` patterns only matched at line boundaries of the final JSON field (no `re.MULTILINE`) and did not accept whitespace as a path boundary, so payloads like `read .env` or `cat ~/.env secrets` were allowed. The hook's argv plumbing was fine — `verify-install.sh`'s `.env` test payload now denies as intended.
+
 - Add a monthly GitHub Actions reminder that opens a pragmatic threat-baseline review issue.
 - Document native npm build-path risk (`binding.gyp` / `node-gyp`), dependency-confusion basics, package publisher token hygiene, provenance limits, and fake Homebrew installer risk.
 - Make the Cursor MCP deny hook template fail closed and teach verification to flag fail-open hook configuration.
