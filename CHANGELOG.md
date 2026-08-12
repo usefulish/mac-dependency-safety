@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document that `managed-settings/gemini.json` was removed intentionally (in the earlier "cleann up" commit): Gemini CLI has been retired by Google, so the repo no longer ships a Gemini managed-settings template.
+
 - Fix the Cursor MCP deny hook missing secret paths embedded in command strings: the `.env`/`.ssh`/`.aws` patterns only matched at line boundaries of the final JSON field (no `re.MULTILINE`) and did not accept whitespace as a path boundary, so payloads like `read .env` or `cat ~/.env secrets` were allowed. The hook's argv plumbing was fine — `verify-install.sh`'s `.env` test payload now denies as intended.
 
 - Add a monthly GitHub Actions reminder that opens a pragmatic threat-baseline review issue.
