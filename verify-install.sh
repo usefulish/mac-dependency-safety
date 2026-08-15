@@ -89,6 +89,19 @@ CODEX_REQUIREMENTS="/etc/codex/requirements.toml"
 CODEX_OLD_PATH="/etc/codex/codex.toml"
 if [[ -f "$CODEX_REQUIREMENTS" ]]; then
   pass "Codex requirements file exists: $CODEX_REQUIREMENTS"
+  # A "managed" ceiling the agent's own user can rewrite is not managed. The
+  # README installs this root:wheel; drift back to user ownership has been seen
+  # in the field, and nothing else in this script notices.
+  if [[ -w "$CODEX_REQUIREMENTS" ]]; then
+    fail "Codex requirements file is writable by $(id -un): $(ls -l "$CODEX_REQUIREMENTS" | awk '{print $3":"$4, $1}') — run: sudo chown root:wheel $CODEX_REQUIREMENTS"
+  else
+    pass "Codex requirements file is not writable by the current user"
+  fi
+  if file_contains "$CODEX_REQUIREMENTS" 'allowed_permission_profiles'; then
+    pass "Codex requirements constrain permission profiles"
+  else
+    fail "Codex requirements does not mention allowed_permission_profiles — user-config profiles can widen write scope past allowed_sandbox_modes"
+  fi
   if file_contains "$CODEX_REQUIREMENTS" 'allowed_sandbox_modes'; then
     pass "Codex requirements constrain sandbox modes"
   else

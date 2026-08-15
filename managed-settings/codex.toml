@@ -1,6 +1,22 @@
 allowed_sandbox_modes = ["read-only", "workspace-write"]
 allowed_approval_policies = ["untrusted", "on-request"]
 
+# Write-scope ceiling (knowfleet record d0b38a31). Without this, ANY profile
+# defined in the user-writable ~/.codex/config.toml is selectable — a
+# `"~/" = "write"` profile granted $HOME-wide write even under managed config.
+#
+# Schema note (verified 2026-08-15, codex-cli 0.147.0): this is a MAP of
+# profile name -> bool, not a list. A list fails with "invalid type: sequence,
+# expected a map". Every name listed must already exist — built-ins, or a
+# profile defined in user config — or Codex refuses to start with
+# "allowed_permission_profiles refers to undefined profile". repo-git is the
+# audited .git relaxation (80b1ce43); install it in ~/.codex/config.toml FIRST.
+[allowed_permission_profiles]
+":read-only"           = true
+":workspace"           = true
+"repo-git"             = true
+":danger-full-access"  = false
+
 [permissions.filesystem]
 deny_read = [
   "~/.ssh",
@@ -12,7 +28,7 @@ deny_read = [
   "~/.git-credentials",
   "~/.docker/config.json",
   "~/.kube/config",
-  "**/.env",
-  "**/.env.*",
-  "**/.npmrc",
+  "~/**/.env",
+  "~/**/.env.*",
+  "~/**/.npmrc",
 ]
