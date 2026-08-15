@@ -81,6 +81,43 @@ sudo chown root:wheel "/etc/codex/requirements.toml"
 sudo chmod 644        "/etc/codex/requirements.toml"
 ```
 
+#### Adding or removing a permission profile — ALWAYS two files, in order
+
+Codex's permission-profile system spans a root-owned ceiling and a user-owned
+definition. Editing one side alone either does nothing or bricks Codex:
+
+1. **Define the profile in `~/.codex/config.toml`** (user-writable, mode 600):
+   ```toml
+   [permissions.<name>]
+   extends = ":workspace"
+   [permissions.<name>.filesystem]
+   "<path>" = "write"   # or "read"/"deny"
+   ```
+2. **Allowlist it in `/etc/codex/requirements.toml`** (root-owned, needs sudo)
+   as a top-level table — a MAP of name to boolean, not a list:
+   ```toml
+   [allowed_permission_profiles]
+   ":read-only"           = true
+   ":workspace"           = true
+   "<name>"               = true
+   ":danger-full-access"  = false
+   ```
+
+Hard constraints, both probed (d0b38a31):
+- **Every name listed in requirements.toml must already exist in user config.**
+  A name listed but undefined makes Codex refuse to start:
+  `requirements.toml allowed_permission_profiles refers to undefined profile '<name>'`.
+  So step 1 before step 2, always.
+- **Removing a profile is the same trap in reverse**: delete the user-config
+  definition first and the requirements line second. Removing the definition
+  while the allowlist still names it bricks Codex the same way.
+- **Placement matters.** Appending `allowed_permission_profiles = {...}` to the
+  end of requirements.toml silently nests it under the last table header where
+  it is an unknown key, ignored with no diagnostic. Write it as a top-level
+  `[allowed_permission_profiles]` table, above the first table header.
+- `default_permissions` in requirements is not required once the allowlist
+  includes both `:workspace` and `:read-only`.
+
 ### 0f. Hermes managed scope
 File: `/etc/hermes/config.yaml`
 (template: [`managed-settings/hermes.yaml`](./managed-settings/hermes.yaml))
@@ -147,6 +184,28 @@ not a determined attacker. Contrast with 0a/0b above, whose root-owned files a
 non-root process genuinely cannot touch — those are the real walls; this is a
 speed bump. You must also run `chflags nouchg <file>` to unlock before making
 legitimate changes.*
+
+#### Why there is no root-owned anchor (investigated 2026-08-15)
+
+Cursor 3.15.6 has **no admin-managed path-permission layer**, and what exists
+is not usable as one:
+
+- `~/.cursor/sandbox-policies/` looks like a config surface but is Cursor's
+  **internal scratch transport**: files are written mode 0600 with a
+  `sandbox-policy-*` prefix and **garbage-collected after 1 hour** by mtime
+  (`packages/shell-exec/src/sandbox/policy-file.ts`, env override
+  `CURSOR_SANDBOX_POLICY_DIR`). A file you place there is either ignored (wrong
+  prefix) or deleted (right prefix, old). It is also user-owned (mode 700),
+  which gives it no more standing than `chflags` anyway. Do not build a layer
+  on it.
+- The app **ships** an MDM-format profile,
+  `app/policies/com.todesktop.230313mzl4w4u92.mobileconfig` (keys:
+  `UpdateMode`, `SignInEnforcement`, `WorkspaceTrustEnabled`, `AllowedExtensions`,
+  `AllowedLoginDomains`), which WOULD be a root-anchored layer if deployed via
+  macOS profile installation — but it currently contains **no path-permission
+  keys**, and the fleet has no profile-install infrastructure. Worth revisiting
+  if Cursor extends that payload; until then Layer 0c stays a speed bump and
+  the README says so.
 
 ### 0d. Cursor MCP (friction without enterprise MDM)
 

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 #
-# verify-install.sh - read-only checks for the mac-dependency-safety baseline.
+# verify-install.sh - checks for the mac-dependency-safety baseline.
 #
 # This does not install or change settings. It checks whether the controls this
-# repo documents appear to be present and effective on the current Mac.
+# repo documents are present and EFFECTIVE on the current Mac. Where a control
+# is behavioural (Codex deny_read, Hermes approvals.deny), the check runs the
+# tool's own probe inside that tool's sandbox — a sandboxed read installs and
+# changes nothing. The one execution outside a sandbox is `codex ... doctor`,
+# which is read-only by design.
 
 set -u
 
@@ -112,10 +116,8 @@ if [[ -f "$CODEX_REQUIREMENTS" ]]; then
   else
     fail "Codex requirements does not mention allowed_approval_policies"
   fi
-  if file_contains "$CODEX_REQUIREMENTS" 'deny_read'; then
-    pass "Codex requirements include filesystem deny_read rules"
-  else
-    warn "Codex requirements does not mention filesystem deny_read rules"
+  if ! file_contains "$CODEX_REQUIREMENTS" 'deny_read'; then
+    fail "Codex requirements does not mention filesystem deny_read rules — nothing to probe"
   fi
 else
   fail "Codex requirements file not found: $CODEX_REQUIREMENTS"
@@ -133,6 +135,26 @@ if have codex; then
     pass "Codex dangerous bypass request is constrained to restricted filesystem"
   else
     warn "Could not confirm Codex dangerous bypass constraint from doctor output"
+  fi
+
+  # Behavioural Layer 0b probe (3fc92706): grep for the deny_read key proved
+  # structurally blind — requirements.toml accepted three inert bare-`**/` globs
+  # for months and the old check reported PASS. Probe what binds, per c3289fd5
+  # (verify by artifact, keep a control row). A sandboxed `cat` installs and
+  # changes nothing; the codex sandbox isolates the probe the same way it
+  # isolates the agent.
+  # Deny path must be refused, control path must succeed — the two rows
+  # together distinguish a working deny from a blanket lockdown.
+  probe_deny="$(codex sandbox --include-managed-config -P :workspace -C "$(pwd)" -- /bin/cat "$HOME/.ssh/oracle.pub" 2>&1)"
+  deny_rc=$?
+  probe_control="$(codex sandbox --include-managed-config -P :workspace -C "$(pwd)" -- /bin/cat "$HOME/.zshrc" 2>&1)"
+  control_rc=$?
+  if [[ "$deny_rc" -ne 0 && "$control_rc" -eq 0 ]]; then
+    pass "Codex deny_read binds: ~/.ssh denied, ~/.zshrc control readable"
+  elif [[ "$deny_rc" -eq 0 ]]; then
+    fail "Codex deny_read is inert: ~/.ssh/oracle.pub was readable in the sandbox"
+  else
+    warn "Could not confirm Codex deny_read behaviour (deny_rc=$deny_rc control_rc=$control_rc)"
   fi
 else
   warn "codex command not found"
@@ -189,6 +211,16 @@ fi
 
 say "Layer 0e: Cursor MCP"
 
+# Layer 0c/0d verdicts depend on whether Cursor is actually installed: a
+# missing layer on a machine that does not run Cursor is a WARN (correctly
+# absent), on one that does it is a FAIL (layer should exist). Mirrors how the
+# script treats codex/npm presence.
+if [[ -d "/Applications/Cursor.app" ]]; then
+  cursor_installed=1
+else
+  cursor_installed=0
+fi
+
 CURSOR_PERMS="$HOME/.cursor/permissions.json"
 if [[ -f "$CURSOR_PERMS" ]]; then
   if json_valid "$CURSOR_PERMS"; then
@@ -202,7 +234,11 @@ if [[ -f "$CURSOR_PERMS" ]]; then
     pass "Cursor mcpAllowlist does not contain *:*"
   fi
 else
-  warn "Cursor permissions.json not found: $CURSOR_PERMS"
+  if (( cursor_installed )); then
+    fail "Cursor permissions.json not found (Cursor is installed): $CURSOR_PERMS"
+  else
+    warn "Cursor permissions.json not found: $CURSOR_PERMS"
+  fi
 fi
 
 CURSOR_MCP="$HOME/.cursor/mcp.json"
@@ -218,7 +254,11 @@ if [[ -f "$CURSOR_MCP" ]]; then
     pass "Cursor mcp.json does not reference @latest"
   fi
 else
-  warn "Cursor mcp.json not found: $CURSOR_MCP"
+  if (( cursor_installed )); then
+    fail "Cursor mcp.json not found (Cursor is installed): $CURSOR_MCP"
+  else
+    warn "Cursor mcp.json not found: $CURSOR_MCP"
+  fi
 fi
 
 CURSOR_HOOK="$HOME/.cursor/hooks/deny-risky-mcp.sh"
@@ -230,7 +270,11 @@ if [[ -x "$CURSOR_HOOK" ]]; then
     fail "Cursor deny-risky-mcp hook did not deny a .env test call"
   fi
 else
-  warn "Cursor deny-risky-mcp hook not executable: $CURSOR_HOOK"
+  if (( cursor_installed )); then
+    fail "Cursor deny-risky-mcp hook not installed (Cursor is installed): $CURSOR_HOOK"
+  else
+    warn "Cursor deny-risky-mcp hook not executable: $CURSOR_HOOK"
+  fi
 fi
 
 CURSOR_HOOKS_JSON="$HOME/.cursor/hooks.json"
@@ -246,7 +290,11 @@ if [[ -f "$CURSOR_HOOKS_JSON" ]]; then
     fail "Cursor hooks.json exists but is not valid JSON: $CURSOR_HOOKS_JSON"
   fi
 else
-  warn "Cursor hooks.json not found: $CURSOR_HOOKS_JSON"
+  if (( cursor_installed )); then
+    fail "Cursor hooks.json not found (Cursor is installed): $CURSOR_HOOKS_JSON"
+  else
+    warn "Cursor hooks.json not found: $CURSOR_HOOKS_JSON"
+  fi
 fi
 
 say "Layer 0.5: Immutable config files"
@@ -257,7 +305,11 @@ for protected_file in "$CURSOR_SETTINGS" "$CURSOR_MCP" "$CURSOR_PERMS"; do
     if is_immutable "$protected_file"; then
       pass "Immutable flag set: $protected_file"
     else
-      warn "Immutable flag not set: $protected_file"
+      if (( cursor_installed )); then
+        fail "Immutable flag not set (Cursor is installed): $protected_file"
+      else
+        warn "Immutable flag not set: $protected_file"
+      fi
     fi
   fi
 done
