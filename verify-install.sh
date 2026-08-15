@@ -297,6 +297,46 @@ else
   fi
 fi
 
+say "Layer 0g: Antigravity sandboxing"
+
+# Antigravity (Google agent IDE) has a native terminal sandbox (Seatbelt on
+# macOS) plus a fine-grained permissions engine. The toggle is USER-owned
+# (~/.gemini/config/config.json, guru:staff) — this is defense-in-depth, NOT a
+# root-anchored layer like 0a/0b/0f. Artifact check only: behavioural
+# enforcement needs the IDE running (sandbox-exec wraps commands the AGENT
+# runs, not shell commands from this script). See record 923afca2.
+ANTIGRAVITY_APP="/Applications/Antigravity.app"
+ANTIGRAVITY_SETTINGS="$HOME/.gemini/config/config.json"
+if [[ -d "$ANTIGRAVITY_APP" ]]; then
+  antigravity_installed=1
+else
+  antigravity_installed=0
+fi
+
+if (( antigravity_installed )); then
+  if [[ -f "$ANTIGRAVITY_SETTINGS" ]]; then
+    if json_valid "$ANTIGRAVITY_SETTINGS"; then
+      pass "Antigravity user settings exist and are valid JSON"
+    else
+      fail "Antigravity user settings exists but is not valid JSON: $ANTIGRAVITY_SETTINGS"
+    fi
+    if python3 -c "
+import json, sys
+with open('$ANTIGRAVITY_SETTINGS') as f:
+    d = json.load(f)
+sys.exit(0 if d.get('userSettings', {}).get('enableTerminalSandbox') is True else 1)
+"; then
+      pass "Antigravity terminal sandbox is enabled (enableTerminalSandbox)"
+    else
+      fail "Antigravity terminal sandbox is NOT enabled (enableTerminalSandbox missing or false)"
+    fi
+  else
+    fail "Antigravity user settings not found (Antigravity is installed): $ANTIGRAVITY_SETTINGS"
+  fi
+else
+  warn "Antigravity not installed; layer 0g not applicable"
+fi
+
 say "Layer 0.5: Immutable config files"
 
 CURSOR_SETTINGS="$HOME/Library/Application Support/Cursor/User/settings.json"
