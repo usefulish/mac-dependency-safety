@@ -138,6 +138,55 @@ else
   warn "codex command not found"
 fi
 
+say "Layer 0f: Hermes managed scope"
+
+# Hermes reads managed config from /etc/hermes, relocatable via HERMES_MANAGED_DIR.
+# Honour the override here so the check follows the same resolution the agent does
+# — and flag it, because a user-settable override defeats the whole layer.
+HERMES_MANAGED="${HERMES_MANAGED_DIR:-/etc/hermes}/config.yaml"
+if [[ -n "${HERMES_MANAGED_DIR:-}" ]]; then
+  warn "HERMES_MANAGED_DIR is set to '$HERMES_MANAGED_DIR'; managed scope can be repointed by whoever sets it"
+fi
+
+if [[ -f "$HERMES_MANAGED" ]]; then
+  pass "Hermes managed config exists: $HERMES_MANAGED"
+  if [[ -w "$HERMES_MANAGED" ]]; then
+    fail "Hermes managed config is writable by $(id -un) — run: sudo chown root:wheel $HERMES_MANAGED"
+  else
+    pass "Hermes managed config is not writable by the current user"
+  fi
+  if file_contains "$HERMES_MANAGED" 'deny:'; then
+    pass "Hermes managed config pins approvals.deny rules"
+  else
+    fail "Hermes managed config has no approvals.deny rules — nothing survives --yolo without them"
+  fi
+else
+  warn "Hermes managed config not found: $HERMES_MANAGED"
+fi
+
+# Behavioural probe, not a grep. `hermes approvals test` evaluates the real
+# runtime guards and never executes the command, prompts, or persists anything.
+# Exit codes: 0 allow, 2 ask, 3 deny. The benign probe matters as much as the
+# secret one — it separates a working rule set from an unusably broad one.
+if have hermes; then
+  hermes approvals test -- cat "$HOME/.ssh/id_rsa" >/dev/null 2>&1
+  secret_verdict=$?
+  hermes approvals test -- cat prod.envelope >/dev/null 2>&1
+  benign_verdict=$?
+  if [[ "$secret_verdict" -eq 3 ]]; then
+    pass "Hermes denies reading ~/.ssh via the terminal tool"
+  else
+    fail "Hermes allows reading ~/.ssh via the terminal tool (verdict $secret_verdict; expected 3=deny)"
+  fi
+  if [[ "$benign_verdict" -eq 3 ]]; then
+    fail "Hermes deny rules are over-broad: a benign 'prod.envelope' read is blocked"
+  else
+    pass "Hermes deny rules leave benign commands alone"
+  fi
+else
+  warn "hermes command not found"
+fi
+
 say "Layer 0e: Cursor MCP"
 
 CURSOR_PERMS="$HOME/.cursor/permissions.json"

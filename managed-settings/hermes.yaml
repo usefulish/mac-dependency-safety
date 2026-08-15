@@ -1,0 +1,105 @@
+# Layer 0f — Hermes managed scope.
+#
+# Install to /etc/hermes/config.yaml, owned by root (dir 0755, file 0644).
+# The filesystem permission IS the enforcement mechanism: a standard user can
+# read this file but not edit it, and for the keys pinned here the managed layer
+# beats ~/.hermes/config.yaml, ~/.hermes/.env, and the shell environment.
+#
+#   sudo mkdir -p /etc/hermes
+#   sudo cp managed-settings/hermes.yaml /etc/hermes/config.yaml
+#   sudo chown root:wheel /etc/hermes/config.yaml
+#   sudo chmod 0755 /etc/hermes
+#   sudo chmod 0644 /etc/hermes/config.yaml
+#
+# Merging is leaf-level, so pinning approvals.deny does not freeze the rest of
+# approvals.*. Note the corollary: a managed list REPLACES the user's list for
+# that key rather than appending to it, so any per-machine deny rules a user
+# relies on must be folded in here.
+#
+# WHAT THIS DOES AND DOES NOT DO — read before trusting it.
+#
+# `approvals.deny` is the only unconditional lever Hermes exposes: matching
+# terminal commands are blocked BEFORE --yolo, /yolo and `approvals.mode: off`
+# are consulted. Verified 2026-08-15 (see "Verification" below) that these rules
+# still deny with a user config of `mode: off` + `deny: []`.
+#
+# It is a command-text matcher, not a path-based read guard. Hermes has no
+# equivalent of Claude Code's `Read(...)` deny or Codex's `deny_read`:
+#   - It only sees the `terminal` tool. Hermes' own file-read tool is NOT
+#     covered by anything here, and Hermes ships no read guard for it.
+#   - Path traversal defeats it: `cat ~/.config/../.ssh/id_rsa` is ALLOWED.
+#   - Enforcement is filesystem permissions only. An agent running as root, or a
+#     user who can set HERMES_MANAGED_DIR to a directory they control, bypasses
+#     the whole layer. Fix HERMES_MANAGED_DIR in the service unit if you rely on
+#     it; `hermes doctor` reports the resolved managed directory.
+#
+# Treat this as a guardrail against an honest-but-wrong agent — the same threat
+# model Hermes states for deny rules — not as a sandbox against a hostile one.
+# For that, use an isolated backend (Docker) or an egress-restricted network.
+#
+# Patterns are fnmatch globs matched case-insensitively against the whole
+# command, over the same normalized/deobfuscated variants the dangerous-pattern
+# detector uses. Two consequences worth knowing:
+#   - Hermes normalizes /Users/<you> to ~ before matching, so a `~/`-anchored
+#     pattern also catches the absolute-path spelling.
+#   - Simple quoting tricks are covered: `cat .e""nv` denies.
+# Always quote patterns — a bare leading `*` is a YAML alias and fails to parse.
+
+approvals:
+  # Pinned so a user config cannot set `off` and drop dangerous-command checks
+  # wholesale. The deny list below already outranks `off`, so this is a second
+  # line rather than the load-bearing one; relax it per-machine if a container
+  # deployment genuinely needs unattended execution.
+  mode: smart
+
+  # Headless cron hits a dangerous command with no human present: fail closed.
+  cron_mode: deny
+
+  deny:
+    # OS credential stores — mirrors the Layer 0a/0b deny_read sets.
+    - "*~/.ssh*"
+    - "*~/.aws*"
+    - "*~/.config/gcloud*"
+    - "*~/.config/gh*"
+    - "*~/.netrc*"
+    - "*~/.git-credentials*"
+    - "*~/.docker/config.json*"
+    - "*~/.kube/config*"
+
+    # Package-manager credentials, anywhere (project-local .npmrc carries tokens).
+    - "*.npmrc*"
+
+    # Project secret files. Three patterns, not one:
+    #   "*.env"              — command ends with .env            (cat .env)
+    #   "*.env[!a-z0-9_-]*"  — .env followed by a non-filename char, which
+    #                          covers compound commands (cat .env && ls) and
+    #                          suffixed variants (.env.production) WITHOUT
+    #                          catching prod.envelope or my-environment.md
+    #   "*.envrc*"           — direnv, which .env patterns miss
+    # A bare "*.env*" would match .envelope/.environment and is deliberately
+    # NOT used.
+    - "*.envrc*"
+    - "*.env"
+    - "*.env[!a-z0-9_-]*"
+
+security:
+  # On by default; pinned so it cannot be turned off. Redacts key/token-shaped
+  # strings in tool output before they enter context and logs.
+  redact_secrets: true
+
+  # Deliberately NOT pinned: tirith_fail_open. Setting it false blocks commands
+  # whenever the tirith binary is missing, which fails closed into an unusable
+  # agent on a machine that never installed it. Pin it only where tirith is
+  # actually deployed and verified.
+
+# Verification (do not trust this file's presence — probe it):
+#
+#   hermes approvals test -- cat ~/.ssh/id_rsa      # expect exit 3 (deny)
+#   hermes approvals test -- cat .env               # expect exit 3 (deny)
+#   hermes approvals test -- cat prod.envelope      # expect exit 0 (allow)
+#   hermes doctor                                   # names the resolved managed dir
+#
+# `approvals test` evaluates the real runtime guards and never executes the
+# command, prompts, or persists anything. Exit codes: 0 allow, 2 ask, 3 deny.
+# The third probe matters as much as the first two — it distinguishes a working
+# rule set from one so broad it blocks ordinary work.

@@ -81,6 +81,56 @@ sudo chown root:wheel "/etc/codex/requirements.toml"
 sudo chmod 644        "/etc/codex/requirements.toml"
 ```
 
+### 0f. Hermes managed scope
+File: `/etc/hermes/config.yaml`
+(template: [`managed-settings/hermes.yaml`](./managed-settings/hermes.yaml))
+
+Install by hand:
+```bash
+sudo mkdir -p "/etc/hermes"
+sudo cp managed-settings/hermes.yaml "/etc/hermes/config.yaml"
+sudo chown root:wheel "/etc/hermes/config.yaml"
+sudo chmod 755        "/etc/hermes"
+sudo chmod 644        "/etc/hermes/config.yaml"
+```
+
+Hermes' managed scope pins specific config keys above `~/.hermes/config.yaml`,
+`~/.hermes/.env` **and** the shell environment, enforced purely by the file's
+root ownership. Merging is leaf-level, so a managed list *replaces* the user's
+value for that key rather than appending — fold any per-machine deny rules into
+the template.
+
+The load-bearing key is `approvals.deny`: matching terminal commands are blocked
+*before* `--yolo`, `/yolo` and `approvals.mode: off` are consulted. Verified with
+a user config of `mode: off` + `deny: []` still denying.
+
+**Know what this is not.** Hermes has no path-based read guard — no equivalent of
+Claude Code's `Read(...)` deny or Codex's `deny_read`. These rules match command
+text seen by the `terminal` tool only, so:
+
+- Hermes' own file-read tool is **not** covered by anything here.
+- Path traversal defeats it — `cat ~/.config/../.ssh/id_rsa` is allowed.
+- An agent running as root, or anyone who can set `HERMES_MANAGED_DIR`, bypasses
+  the layer entirely. Fix that variable in the service unit if you depend on it.
+
+It is a guardrail against an honest-but-wrong agent, which is the threat model
+Hermes itself states for deny rules — not a sandbox against a hostile one.
+
+Verify behaviourally rather than by presence (`approvals test` evaluates the real
+guards and never executes the command; 0 allow, 2 ask, 3 deny):
+
+```bash
+hermes approvals test -- cat ~/.ssh/id_rsa   # expect exit 3
+hermes approvals test -- cat .env            # expect exit 3
+hermes approvals test -- cat prod.envelope   # expect exit 0  <- catches over-broad rules
+hermes doctor                                # names the resolved managed dir
+```
+
+Hermes already blocks *writes* to credential paths (`~/.ssh`, `.env` anywhere,
+its own `auth.json`) natively for `write_file`/`patch` — but not for `terminal`.
+Layer 0f covers the read/exfil side of the same paths, as far as command-text
+matching can.
+
 ### 0c. Cursor settings (a speed bump, not a wall)
 Cursor stores its settings in user-writable JSON files. A malicious `postinstall`
 script can `sed` these to enable bypass modes. Setting your safety defaults and
