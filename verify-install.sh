@@ -75,7 +75,11 @@ PY
 
 say "Layer 0: AI agent managed settings"
 
-CLAUDE_MANAGED="/Library/Application Support/ClaudeCode/managed-settings.json"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  CLAUDE_MANAGED="/Library/Application Support/ClaudeCode/managed-settings.json"
+else
+  CLAUDE_MANAGED="/etc/claude-code/managed-settings.json"   # Linux location
+fi
 if [[ -f "$CLAUDE_MANAGED" ]]; then
   if json_valid "$CLAUDE_MANAGED"; then
     pass "Claude Code managed settings file exists and is valid JSON"
