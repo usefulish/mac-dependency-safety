@@ -616,15 +616,54 @@ When in doubt, container.
 
 ---
 
+## Fleet onboarding: sandbox by default
+
+A new machine's agents should be sandboxed *because it was onboarded*, not
+retrofitted later. `onboard-agents.sh` is the agent-harness step of the fleet's
+machine-onboarding process (reference card `machine-onboarding.md`, Phase 4.5)
+and it ends on checks that bind, not on files being present:
+
+```bash
+bash onboard-agents.sh                    # 1. harden-deps.sh (all layers this box supports; sudo once)
+                                          # 2. knowfleet-gate into EVERY Hermes profile + global,
+                                          #    verified via `hermes -p <p> plugins list --plain --no-bundled`
+                                          # 3. verify-install.sh as the acceptance gate — any FAIL
+                                          #    not named with --allow-fail exits 1
+bash onboard-agents.sh --check            # existing machine: verify-only (steps 2 + 3)
+bash onboard-agents.sh --allow-fail Cursor  # accept a KNOWN pre-onboarding gap; record it in the machine card
+```
+
+Step 2 lives in the knowfleet repo (`harness/hermes/install-gate.sh`; set
+`KNOWFLEET_REPO` if it is not at `~/Code/active/knowfleet`) because that is
+where the canonical plugin lives. Why it verifies discovery rather than
+config: a `plugins.enabled: [knowfleet-gate]` entry with no plugin files is
+inert and looks healthy — four profiles ran ungated that way (record
+`1abe4c95`). Only Hermes's own `plugins list` proves the plugin loads.
+
+Where the harness differs, the layer differs — say so in the machine card:
+
+| Platform | Applies | Does not apply | Watch for |
+|---|---|---|---|
+| macOS (kimchi, laksa) | 0a, 0b, 0c–0e, 0f, 0g, 0h, 1–3 | — | restart pi hosts / Hermes gateways after install |
+| Linux (bingsu) | 0a (`/etc/claude-code/managed-settings.json`), 0b, 0f, 1, 2 | 0h (`sandbox-exec`), Cursor, Homebrew | pi on Linux stays **unsandboxed** until a bubblewrap port exists |
+| Unraid (rougamo) | as Linux, but `/etc` is rebuilt at boot | 0h, Cursor, Homebrew | re-apply root-owned files from `/boot/config/go`; agents run as **root**, which bypasses Layer 0f and makes any root-owned "ceiling" editable |
+
+The acceptance gate is deliberately strict: a machine whose verify run shows a
+FAIL is not onboarded, and a known gap has to be named on the command line —
+which is the moment to write it into the machine card rather than forget it.
+
 ## Using the script (optional)
 
 After you've read [`harden-deps.sh`](./harden-deps.sh) and the
 [`managed-settings/`](./managed-settings/) templates it may install:
 ```bash
 less harden-deps.sh        # actually read it
-bash harden-deps.sh        # applies Layers 0a-0d and 1-3; prompts for sudo once
+bash harden-deps.sh        # applies Layers 0a-0h (where the harness is installed) and 1-3; prompts for sudo once
 ```
 Layer 4 (`AGENTS.md`) is manual — project or global install per section above.
+Layer 0h's extension is installed only after its root half succeeds (it fails
+closed); Layers 0f and 0h are skipped when `hermes`/`pi` are not on PATH, and 0h
+is skipped on Linux.
 It guards each tool behind a presence check, won't clobber an existing
 `~/Brewfile` or existing `~/.cursor/mcp.json`, tags every loosenable line with
 `# LOOSEN:`, and prints final state. Nothing in it isn't in this README.
