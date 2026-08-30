@@ -18,6 +18,16 @@ allowed_approval_policies = ["untrusted", "on-request"]
 ":danger-full-access"  = false
 
 [permissions.filesystem]
+# ~/.npmrc is denied deliberately (registry tokens) — with the measured
+# consequence (task #284, 2026-08-30, codex-cli 0.150.1) that npm inside a
+# Codex sandbox reports ignore-scripts=false: Layer 1's guard lives in that
+# file, and npm treats an unreadable user config as absent. Accepted, because
+# the deny cannot be narrowed: "~/**/.npmrc" matches "~/.npmrc" itself
+# (zero-segment glob, probed live), no allow_read key exists, and a -c
+# override cannot weaken the managed list — exempting the home file would
+# also exempt every project .npmrc under ~. Do not remove the "~/.npmrc"
+# entry alone expecting an exemption: the glob still matches it. Known gap:
+# the ~/-rooted globs do not cover .npmrc outside $HOME (e.g. /tmp checkouts).
 deny_read = [
   "~/.ssh",
   "~/.aws",
