@@ -168,6 +168,119 @@ its own `auth.json`) natively for `write_file`/`patch` — but not for `terminal
 Layer 0f covers the read/exfil side of the same paths, as far as command-text
 matching can.
 
+### 0h. pi sandbox
+Files: `/etc/pi/sandbox.sb`, `/etc/pi/bash`, `/etc/pi/ripgrep.conf` (root-owned)
+and `~/.pi/agent/extensions/dependency-safety.ts` (user-owned)
+(templates: [`managed-settings/pi/`](./managed-settings/pi/))
+
+[pi](https://github.com/earendil-works/pi-mono) ships **no sandbox and no
+managed settings** — its docs say so, and point at containers. Its `bash`
+tool runs `bash -c <command>` as you, `read` opens any file, and an A2A-dispatched
+worker gets the same tools. This layer bolts a kernel-enforced read guard onto
+the tools pi already has, in two halves that are only useful together.
+
+**Root half — the wall.** A Seatbelt profile (the same `sandbox-exec` mechanism
+Codex and Antigravity use on macOS) denies reads of credential paths, and a
+wrapper runs every agent command under it. Because the kernel resolves the
+path, `cat ~/.config/../.ssh/id_rsa`, symlinks and `$(printf …)` tricks all
+fail the same way: `Operation not permitted`. Child processes inherit it.
+
+```bash
+sudo mkdir -p /etc/pi
+sudo cp managed-settings/pi/sandbox.sb   /etc/pi/sandbox.sb
+sudo cp managed-settings/pi/bash         /etc/pi/bash
+sudo cp managed-settings/pi/ripgrep.conf /etc/pi/ripgrep.conf
+sudo chown -R root:wheel /etc/pi
+sudo chmod 755 /etc/pi /etc/pi/bash
+sudo chmod 644 /etc/pi/sandbox.sb /etc/pi/ripgrep.conf
+```
+
+**User half — the pointer.** A pi extension overrides the built-in `bash` tool
+to use the wrapper (fail-closed: no wrapper, no bash), overrides the in-process
+`read` tool with the same deny set, blocks `write`/`edit` into credential
+directories and into its own directory, refuses `grep`/`find`/`ls` aimed into a
+credential directory, and gives the `grep` tool's ripgrep the root-owned config
+so a content sweep skips secret files.
+
+```bash
+mkdir -p ~/.pi/agent/extensions
+cp managed-settings/pi/dependency-safety.ts ~/.pi/agent/extensions/
+# Then RESTART every long-lived pi process (interactive sessions, the A2A
+# host): the extension set is loaded once per process.
+```
+
+Install the root half **first**. The extension fails closed, so installing it
+alone disables pi's bash tool until `/etc/pi` exists.
+
+**Know what this is not.**
+
+- The wall is root-owned; the pointer is not. Anyone who can write
+  `~/.pi/agent` can delete the extension, and `pi --no-extensions` (`-ne`)
+  starts a session without it. That is the standing of a user-owned toggle
+  (like Antigravity's terminal-sandbox switch, checked as Layer 0g in
+  `verify-install.sh`), weaker than 0a/0b/0f where the agent consults the
+  root-owned file directly. pi has no managed-config path to fix that today.
+  `verify-install.sh` therefore checks the installed extension byte-for-byte
+  against the template and root ownership plus modes of `/etc/pi` and its
+  three files — a user-writable directory would let the agent swap the
+  profile for an allow-all one between two bash calls.
+- **Known hole: pre-existing hard links.** Seatbelt and the guard both decide
+  by path. A hard link to `~/.ssh/id_rsa` that already sits at an allowed path
+  reads normally (verified 2026-08-30). Creating one from inside the sandbox
+  is denied, pi's tools cannot create one, and it needs the same filesystem —
+  so it takes prior local access. Symlinks are caught: the kernel resolves
+  them before the deny applies, and the guard checks both the path as written
+  and its resolved target (through the deepest existing parent, so a new file
+  under a symlinked directory is judged by where it would really land).
+- `grep` gets two extra rules because ripgrep's own precedence undoes a config
+  file: an explicit file operand runs in single-file mode where `--glob`
+  exclusions do not apply, and the tool's `glob` argument comes after the
+  config so `**` re-includes everything. The hook applies the read deny set to
+  grep targets and rejects globs that would match a secret name; it also
+  blocks `grep` outright when `/etc/pi/ripgrep.conf` is missing. Note pi's
+  standard tool set is `read, bash, edit, write` — `grep`/`find`/`ls` are
+  guarded when enabled (`--tools` or `defaultTools`), not on by default.
+- The `read`/`write`/`grep` guards are in-process path checks, not a sandbox.
+  Another extension or an MCP server in the same pi process has the process's
+  full permissions.
+- **`~/.npmrc` is deliberately readable inside the sandbox.** Layer 1's
+  `ignore-scripts=true` lives there; with it denied, npm inside the sandbox
+  silently reports `ignore-scripts=false` and runs install scripts again
+  (verified 2026-08-30). Project-local `.npmrc` files are still denied, and pi's
+  `read` tool denies `~/.npmrc` regardless. Codex's Layer 0b denies `~/.npmrc`
+  sandbox-wide — check whether npm inside a Codex sandbox still honours Layer 1
+  before relying on it there.
+- Parity costs, same as Codex: `gh` inside pi's bash loses its auth
+  (`~/.config/gh` is denied), and `.env.example` is unreadable because 0a/0b
+  deny `.env.*` and this layer matches them. Run `gh` from your own shell.
+- `sandbox-exec` is deprecated by Apple. It still works on macOS 26.3.1; the
+  verify probe below is what tells you when it stops.
+
+Verify behaviourally, both directions, plus the Layer 1 interaction:
+
+```bash
+/etc/pi/bash -c 'ls ~/.ssh'                    # expect: Operation not permitted
+/etc/pi/bash -c 'cat /etc/hosts'               # expect: success
+/etc/pi/bash -c 'npm config get ignore-scripts' # expect: same as outside (true)
+stat -f '%Su:%Sg %Lp' /etc/pi /etc/pi/*         # expect: root:wheel 755 (dir, bash) / 644 (sandbox.sb, ripgrep.conf)
+cmp ~/.pi/agent/extensions/dependency-safety.ts managed-settings/pi/dependency-safety.ts  # expect: silent
+bash verify-install.sh                          # Layer 0h section does all of the above
+```
+
+Live receipt (2026-08-30, pi 0.84.4, macOS 26.3.1, glm-5.3 via agentrouter):
+in a `pi -p` session with the extension loaded, `bash: cat ~/.ssh/<file>`
+returned `Operation not permitted`; `read` on a fixture `.env` and on a
+non-existent `~/.ssh/…` path returned the guard's denial while `.envelope`
+read normally; `write ~/.ssh/zzz_probe` was blocked and the file did not
+appear; `write` to a scratch file succeeded. Review-driven re-run the same
+day (`--tools read,grep,ls,bash`): `@`-prefixed and `file://` paths were
+judged like plain ones; a `.env.link` symlink to a benign file was denied by
+name; a `write` under a symlink to `~/.ssh` was blocked with no artifact;
+`grep` on an explicit `.env`, `grep` with `glob **`, and `ls` through the
+symlink were all denied while `grep` with `glob *.txt` and a path-less `grep`
+ran with `.env` excluded. A2A child sessions load the same global extension
+set but were not exercised (the host needs a restart first).
+
 ### 0c. Cursor settings (a speed bump, not a wall)
 Cursor stores its settings in user-writable JSON files. A malicious `postinstall`
 script can `sed` these to enable bypass modes. Setting your safety defaults and

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Layer 0h — pi bash wrapper. Install to /etc/pi/bash, root:wheel 0755.
+#
+# pi's `bash` tool is pointed at this file by ~/.pi/agent/extensions/
+# dependency-safety.ts (shellPath), so every agent command — and everything
+# it spawns — runs under the Seatbelt profile /etc/pi/sandbox.sb. pi calls the
+# shell as `<shell> -c <command>`; the arguments are passed through untouched.
+#
+# Fail closed: no profile, no shell. A missing or unreadable profile is a
+# broken layer, not a reason to run unsandboxed.
+PROFILE=/etc/pi/sandbox.sb
+if [ ! -r "$PROFILE" ]; then
+  echo "pi-sandbox: $PROFILE missing or unreadable — Layer 0h is fail-closed, command not run" >&2
+  exit 126
+fi
+# HOME must be set: the profile derives every credential path from it.
+: "${HOME:?pi-sandbox: HOME is unset; refusing to run without a home directory to protect}"
+# PI_SANDBOX_INNER_SHELL lets the extension honour a user `shellPath` setting;
+# whatever shell is chosen still runs inside the sandbox.
+exec /usr/bin/sandbox-exec -f "$PROFILE" -D HOME="$HOME" "${PI_SANDBOX_INNER_SHELL:-/bin/bash}" "$@"

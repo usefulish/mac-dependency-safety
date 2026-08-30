@@ -1,0 +1,109 @@
+;; Layer 0h — pi bash sandbox (macOS Seatbelt profile).
+;;
+;; Install to /etc/pi/sandbox.sb, owned by root (dir 0755, file 0644). The
+;; companion wrapper /etc/pi/bash runs every pi `bash` tool command as
+;;
+;;     sandbox-exec -f /etc/pi/sandbox.sb -D HOME=<home> /bin/bash -c <command>
+;;
+;; so the denials below are enforced by the kernel on the command AND every
+;; process it spawns (curl, python, node, a nested shell …). A denied read
+;; fails with EPERM ("Operation not permitted"); nothing here matches command
+;; text, so `cat ~/.config/../.ssh/id_rsa`, symlinks and `$(printf ...)`
+;; obfuscation are all caught — the path is resolved by the kernel, not by us.
+;;
+;; The profile is parameterised on HOME (`-D HOME=...` from the wrapper) so one
+;; root-owned file serves every user on the machine.
+;;
+;; Rule order matters: Seatbelt takes the LAST matching rule, so a later
+;; `allow` re-opens something an earlier `deny` closed. That is how ~/.npmrc is
+;; exempted below.
+;;
+;; sandbox-exec is deprecated by Apple but still shipped and enforced on
+;; macOS 26.3.1 (verified 2026-08-30) — it is the same mechanism Codex's
+;; sandbox and Antigravity's terminal sandbox use on macOS. Re-probe after
+;; every macOS upgrade: verify-install.sh Layer 0h does exactly that.
+;;
+;; KNOWN HOLE — hard links that already exist. Every rule here matches a
+;; PATH; a hard link to ~/.ssh/id_rsa planted at an allowed path before the
+;; sandbox runs reads normally (verified 2026-08-30: `ln ~/.ssh/x.pub /tmp/hl`
+;; outside, `cat /tmp/hl` inside → rc 0). Creating such a link from INSIDE the
+;; sandbox is denied (the file-link rules below, and the read/write denies
+;; already refuse `ln` on these sources), pi's own tools cannot create hard
+;; links, and a hard link needs the same filesystem — so the hole requires
+;; prior local access. Symlinks are not a hole: the kernel resolves them
+;; before matching, so `cat /tmp/sl` → EPERM when /tmp/sl → ~/.ssh/x.
+
+(version 1)
+(allow default)
+
+;; ---------------------------------------------------------------------------
+;; Credential DIRECTORIES: no read of any kind (data or metadata — listing
+;; ~/.ssh reveals which keys exist) and no write (authorized_keys persistence,
+;; planted kube/gcloud contexts). Mirrors the Layer 0a/0b deny sets plus
+;; GPG, the macOS keychain files and common crypto-wallet stores.
+;; ---------------------------------------------------------------------------
+(define (home-subpath rel)
+  (subpath (string-append (param "HOME") rel)))
+
+(deny file-read* file-write* file-link
+  (home-subpath "/.ssh")
+  (home-subpath "/.aws")
+  (home-subpath "/.gnupg")
+  (home-subpath "/.kube")
+  (home-subpath "/.config/gcloud")
+  (home-subpath "/.config/gh")
+  (home-subpath "/Library/Keychains")
+  ;; Wallets / signing keys. Read-denied whole because a wallet directory is
+  ;; nothing but secrets; extend per machine.
+  (home-subpath "/.bitcoin")
+  (home-subpath "/.ethereum")
+  (home-subpath "/.electrum")
+  (home-subpath "/.config/solana")
+  (home-subpath "/Library/Application Support/Bitcoin")
+  (home-subpath "/Library/Application Support/Electrum")
+  (home-subpath "/Library/Application Support/Exodus")
+  (home-subpath "/Library/Application Support/Ledger Live"))
+
+;; Self-protection: the user-side half of this layer lives in
+;; ~/.pi/agent/extensions. A shell command must not be able to delete or
+;; rewrite it (the tool_call hook in dependency-safety.ts covers pi's own
+;; write/edit tools). Reads stay allowed so the agent can inspect the rules.
+(deny file-write* (home-subpath "/.pi/agent/extensions"))
+
+;; ---------------------------------------------------------------------------
+;; Credential FILES: content read denied; metadata (stat/ls) allowed so shell
+;; tooling that merely checks for existence keeps working.
+;; ---------------------------------------------------------------------------
+(define (home-literal rel)
+  (literal (string-append (param "HOME") rel)))
+
+(deny file-read-data file-link
+  (home-literal "/.netrc")
+  (home-literal "/.git-credentials")
+  (home-literal "/.pypirc")
+  (home-literal "/.docker/config.json")
+  ;; Agent harness API-key stores. pi reads its own auth.json in-process,
+  ;; never through the bash tool, so denying it here costs nothing.
+  (home-literal "/.pi/agent/auth.json")
+  (home-literal "/.codex/auth.json")
+  (home-literal "/.claude/.credentials.json")
+  (home-literal "/.hermes/auth.json"))
+
+;; Project secret files, anywhere on the filesystem. Regexes are anchored on
+;; the final path component:
+;;   .env, .env.local, .env.production …  (NOT .envelope, NOT my-environment)
+;;   .envrc                               (direnv)
+;;   .npmrc                               (registry tokens) — see exemption below
+(deny file-read-data file-link
+  (regex #"(^|/)\.env(\.[^/]*)?$")
+  (regex #"(^|/)\.envrc$")
+  (regex #"(^|/)\.npmrc$"))
+
+;; EXEMPTION — ~/.npmrc stays readable. Layer 1 (`npm config set
+;; ignore-scripts true`) lives in that file; with it denied, npm inside the
+;; sandbox silently falls back to ignore-scripts=false and install scripts run
+;; again (verified 2026-08-30: `npm config get ignore-scripts` → false under
+;; the deny, true without it). A per-project .npmrc is still denied — that is
+;; where registry tokens and a repo's own `ignore-scripts=false` would sit.
+;; pi's in-process `read` tool denies ~/.npmrc regardless (Layer 0a parity).
+(allow file-read-data (home-literal "/.npmrc"))
