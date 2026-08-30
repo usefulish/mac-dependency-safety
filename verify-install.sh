@@ -236,6 +236,13 @@ else
   cursor_installed=0
 fi
 
+# Cursor is a TEMPORARY fleet worker (decision c983f950, guru 2026-08-30):
+# its Layer 0c/0d gaps (immutable flags, permissions allowlist) are ACCEPTED
+# DEBT, reported as WARN rather than FAIL. Set CURSOR_TEMP_WORKER=0 (or flip
+# the default) if Cursor becomes a permanent host — the checks revert to FAIL
+# until the layer is hardened.
+CURSOR_TEMP_WORKER=${CURSOR_TEMP_WORKER:-1}
+
 CURSOR_PERMS="$HOME/.cursor/permissions.json"
 if [[ -f "$CURSOR_PERMS" ]]; then
   if json_valid "$CURSOR_PERMS"; then
@@ -250,7 +257,11 @@ if [[ -f "$CURSOR_PERMS" ]]; then
   fi
 else
   if (( cursor_installed )); then
-    fail "Cursor permissions.json not found (Cursor is installed): $CURSOR_PERMS"
+    if (( CURSOR_TEMP_WORKER )); then
+      warn "Cursor permissions.json not found (Cursor is a TEMP worker — ACCEPTED DEBT per c983f950): $CURSOR_PERMS"
+    else
+      fail "Cursor permissions.json not found (Cursor is installed): $CURSOR_PERMS"
+    fi
   else
     warn "Cursor permissions.json not found: $CURSOR_PERMS"
   fi
@@ -490,7 +501,11 @@ for protected_file in "$CURSOR_SETTINGS" "$CURSOR_MCP" "$CURSOR_PERMS"; do
       pass "Immutable flag set: $protected_file"
     else
       if (( cursor_installed )); then
-        fail "Immutable flag not set (Cursor is installed): $protected_file"
+        if (( CURSOR_TEMP_WORKER )); then
+          warn "Immutable flag not set (Cursor is a TEMP worker — ACCEPTED DEBT per c983f950): $protected_file"
+        else
+          fail "Immutable flag not set (Cursor is installed): $protected_file"
+        fi
       else
         warn "Immutable flag not set: $protected_file"
       fi
