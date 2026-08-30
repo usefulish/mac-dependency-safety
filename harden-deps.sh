@@ -6,6 +6,7 @@
 #
 # This uses sudo (Layer 0) and changes global npm/pip config. It does only what
 # the README documents. Re-runnable. Loosen later by reversing lines marked LOOSEN.
+# Exits 1 if any layer it tried to install failed (skips are not failures).
 #
 # Run from the repo directory:  bash harden-deps.sh
 
@@ -18,17 +19,29 @@ OS_NAME="$(uname -s)"
 ROOT_OWNER="root:0"
 # Re-runnable: an existing managed file that differs from the template is
 # backed up beside itself before being replaced, never silently clobbered.
+# Returns non-zero when a needed backup could not be written, so callers
+# refuse the replacement instead of clobbering the only copy.
 backup_if_differs() {
   local dest="$1" src="$2"
   if [[ -f "$dest" ]] && ! sudo cmp -s "$dest" "$src"; then
     local bak="$dest.bak.$(date +%Y%m%d%H%M%S)"
-    sudo cp -p "$dest" "$bak" && echo "    existing $dest differed — backed up to $bak"
+    if sudo cp -p "$dest" "$bak"; then
+      echo "    existing $dest differed — backed up to $bak"
+    else
+      echo "    could not back up $dest to $bak" >&2
+      return 1
+    fi
   fi
 }
 
 say()  { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 skip() { printf '  – %s\n' "$1"; }
+# A failed install is a failed layer, and a failed layer is a failed run:
+# without this the script returned the status of its last printf and a
+# sudo/cp error in any block was invisible to callers (onboard-agents.sh).
+failures=0
+bad()  { failures=$((failures + 1)); printf '  \033[31m✗\033[0m %s\n' "$1"; }
 
 # ---------------------------------------------------------------------------
 say "Layer 0: AI Agent managed settings (block bypass mode + secret reads)"
@@ -47,7 +60,8 @@ if [[ -f "$SRC_CLAUDE" ]]; then
     && sudo cp "$SRC_CLAUDE" "$DEST_CLAUDE" \
     && sudo chown "$ROOT_OWNER" "$DEST_CLAUDE" \
     && sudo chmod 644 "$DEST_CLAUDE" \
-    && ok "Claude Code: Installed (verify with /status)"
+    && ok "Claude Code: Installed (verify with /status)" \
+    || bad "Claude Code: install FAILED at $DEST_CLAUDE"
 else
   skip "Claude template not found at $SRC_CLAUDE"
 fi
@@ -62,7 +76,8 @@ if [[ -f "$SRC_CODEX" ]]; then
     && sudo cp "$SRC_CODEX" "$DEST_CODEX" \
     && sudo chown "$ROOT_OWNER" "$DEST_CODEX" \
     && sudo chmod 644 "$DEST_CODEX" \
-    && ok "Codex: Installed (bypass modes disabled)"
+    && ok "Codex: Installed (bypass modes disabled)" \
+    || bad "Codex: install FAILED at $DEST_CODEX"
 else
   skip "Codex template not found at $SRC_CODEX"
 fi
@@ -78,13 +93,17 @@ elif [[ ! -f "$SRC_HERMES" ]]; then
   skip "Hermes template not found at $SRC_HERMES"
 else
   echo "  Installing Hermes managed scope..."
-  backup_if_differs "$DEST_HERMES" "$SRC_HERMES"
-  sudo mkdir -p "$DEST_DIR_HERMES" \
-    && sudo cp "$SRC_HERMES" "$DEST_HERMES" \
-    && sudo chown "$ROOT_OWNER" "$DEST_DIR_HERMES" "$DEST_HERMES" \
-    && sudo chmod 755 "$DEST_DIR_HERMES" \
-    && sudo chmod 644 "$DEST_HERMES" \
-    && ok "Hermes: Installed (probe: hermes approvals test -- cat ~/.ssh/id_rsa → exit 3)"
+  if ! backup_if_differs "$DEST_HERMES" "$SRC_HERMES"; then
+    bad "Hermes: refusing to replace $DEST_HERMES — backup failed"
+  else
+    sudo mkdir -p "$DEST_DIR_HERMES" \
+      && sudo cp "$SRC_HERMES" "$DEST_HERMES" \
+      && sudo chown "$ROOT_OWNER" "$DEST_DIR_HERMES" "$DEST_HERMES" \
+      && sudo chmod 755 "$DEST_DIR_HERMES" \
+      && sudo chmod 644 "$DEST_HERMES" \
+      && ok "Hermes: Installed (probe: hermes approvals test -- cat ~/.ssh/id_rsa → exit 3)" \
+      || bad "Hermes: install FAILED at $DEST_HERMES"
+  fi
   if [[ -n "${HERMES_MANAGED_DIR:-}" ]]; then
     echo "    WARNING: HERMES_MANAGED_DIR is set ('$HERMES_MANAGED_DIR') — whoever sets it can repoint the layer."
   fi
@@ -105,20 +124,30 @@ elif [[ ! -f "$SRC_PI_DIR/sandbox.sb" || ! -f "$SRC_PI_DIR/bash" || ! -f "$SRC_P
   skip "pi templates not found under $SRC_PI_DIR"
 else
   echo "  Installing pi sandbox (root half)..."
-  backup_if_differs "$DEST_DIR_PI/sandbox.sb" "$SRC_PI_DIR/sandbox.sb"
-  sudo mkdir -p "$DEST_DIR_PI" \
-    && sudo cp "$SRC_PI_DIR/sandbox.sb" "$SRC_PI_DIR/bash" "$SRC_PI_DIR/ripgrep.conf" "$DEST_DIR_PI/" \
-    && sudo chown -R "$ROOT_OWNER" "$DEST_DIR_PI" \
-    && sudo chmod 755 "$DEST_DIR_PI" "$DEST_DIR_PI/bash" \
-    && sudo chmod 644 "$DEST_DIR_PI/sandbox.sb" "$DEST_DIR_PI/ripgrep.conf" \
-    && pi_root_ok=1 \
-    && ok "pi: /etc/pi installed (probe: /etc/pi/bash -c 'ls ~/.ssh' → Operation not permitted)"
+  # All three root artifacts are compared and backed up, not just the profile.
+  pi_backup_ok=1
+  for pi_file in sandbox.sb bash ripgrep.conf; do
+    backup_if_differs "$DEST_DIR_PI/$pi_file" "$SRC_PI_DIR/$pi_file" || pi_backup_ok=0
+  done
+  if (( ! pi_backup_ok )); then
+    bad "pi: refusing to replace $DEST_DIR_PI — backup failed"
+  else
+    sudo mkdir -p "$DEST_DIR_PI" \
+      && sudo cp "$SRC_PI_DIR/sandbox.sb" "$SRC_PI_DIR/bash" "$SRC_PI_DIR/ripgrep.conf" "$DEST_DIR_PI/" \
+      && sudo chown -R "$ROOT_OWNER" "$DEST_DIR_PI" \
+      && sudo chmod 755 "$DEST_DIR_PI" "$DEST_DIR_PI/bash" \
+      && sudo chmod 644 "$DEST_DIR_PI/sandbox.sb" "$DEST_DIR_PI/ripgrep.conf" \
+      && pi_root_ok=1 \
+      && ok "pi: /etc/pi installed (probe: /etc/pi/bash -c 'ls ~/.ssh' → Operation not permitted)" \
+      || bad "pi: root-half install FAILED at $DEST_DIR_PI"
+  fi
   # The extension fails closed — never install it before the root half exists,
   # or pi's bash tool is disabled until /etc/pi appears.
   if (( pi_root_ok )); then
     mkdir -p "$PI_EXT_DIR" \
       && cp "$SRC_PI_DIR/dependency-safety.ts" "$PI_EXT" \
-      && ok "pi: extension installed at $PI_EXT — RESTART every running pi (interactive + A2A host)"
+      && ok "pi: extension installed at $PI_EXT — RESTART every running pi (interactive + A2A host)" \
+      || bad "pi: extension install FAILED at $PI_EXT"
   else
     skip "pi extension NOT installed because the root half failed (it would fail closed)"
   fi
@@ -134,6 +163,12 @@ SRC_MCP_PERMS="$SCRIPT_DIR/managed-settings/cursor-permissions.json"
 SRC_HOOKS_JSON="$SCRIPT_DIR/managed-settings/cursor-hooks.json"
 SRC_DENY_HOOK="$SCRIPT_DIR/managed-settings/hooks/deny-risky-mcp.sh"
 
+# Layers 0c-0e are macOS-only (Cursor.app, chflags): on Linux this block would
+# create ~/.cursor files for an app that is not there and print unusable
+# instructions, so it is skipped rather than half-applied.
+if [[ "$OS_NAME" != "Darwin" ]]; then
+  skip "Cursor layers 0c-0e are macOS-only - skipping on $OS_NAME"
+else
 mkdir -p "$CURSOR_DIR/hooks"
 
 if [[ -f "$SRC_MCP_PERMS" ]]; then
@@ -159,9 +194,16 @@ else
 fi
 
 if [[ -f "$SRC_DENY_HOOK" ]]; then
-  cp "$SRC_DENY_HOOK" "$CURSOR_DIR/hooks/deny-risky-mcp.sh"
-  chmod +x "$CURSOR_DIR/hooks/deny-risky-mcp.sh"
-  ok "Installed deny hook at $CURSOR_DIR/hooks/deny-risky-mcp.sh"
+  DENY_HOOK="$CURSOR_DIR/hooks/deny-risky-mcp.sh"
+  # User-owned, so a plain copy backs it up; a customized hook must not vanish
+  # under a rerun any more than a managed file would.
+  if [[ -f "$DENY_HOOK" ]] && ! cmp -s "$DENY_HOOK" "$SRC_DENY_HOOK"; then
+    cp -p "$DENY_HOOK" "$DENY_HOOK.bak.$(date +%Y%m%d%H%M%S)" \
+      && echo "    existing $DENY_HOOK differed — backed up beside it"
+  fi
+  cp "$SRC_DENY_HOOK" "$DENY_HOOK"
+  chmod +x "$DENY_HOOK"
+  ok "Installed deny hook at $DENY_HOOK"
   if [[ -f "$CURSOR_DIR/hooks.json" ]]; then
     echo "    Merge beforeMCPExecution from managed-settings/cursor-hooks.json into hooks.json"
   elif [[ -f "$SRC_HOOKS_JSON" ]]; then
@@ -182,6 +224,7 @@ echo "  After MCP and agent settings work, lock (README 0c/0d Lock ritual):"
 echo "    chflags uchg \"$CURSOR_SETTINGS\""
 [[ -f "$MCP_JSON" ]]  && echo "    chflags uchg \"$MCP_JSON\""
 [[ -f "$MCP_PERMS" ]] && echo "    chflags uchg \"$MCP_PERMS\""
+fi  # Darwin-only Cursor layers
 
 # ---------------------------------------------------------------------------
 say "Layer 1: npm - disable lifecycle scripts globally"
@@ -252,3 +295,7 @@ command -v python3 >/dev/null 2>&1 && echo "  pip require-virtualenv:   $(python
 printf '\nLoosen anything cumbersome via the LOOSEN notes above. See README.md.\n'
 printf 'Lock Cursor/MCP when ready: README section 0e (chflags uchg).\n'
 printf 'Layer 4 (AGENTS.md): README — copy agent-instructions/AGENTS.md per repo or globally.\n'
+if (( failures > 0 )); then
+  printf '\n  %d layer(s) FAILED to install (see ✗ above). Fix and re-run; nothing here is done until it says ✓.\n' "$failures"
+  exit 1
+fi

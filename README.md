@@ -624,13 +624,21 @@ machine-onboarding process (reference card `machine-onboarding.md`, Phase 4.5)
 and it ends on checks that bind, not on files being present:
 
 ```bash
-bash onboard-agents.sh                    # 1. harden-deps.sh (all layers this box supports; sudo once)
-                                          # 2. knowfleet-gate into EVERY Hermes profile + global,
+bash onboard-agents.sh                    # 1. harden-deps.sh (every scripted layer this box supports; sudo once;
+                                          #    exits 1 if any layer fails to install)
+                                          # 2. knowfleet-gate into every Hermes profile + global — except
+                                          #    `librarian`, ungated by recorded human decision (bab5e39a) —
                                           #    verified via `hermes -p <p> plugins list --plain --no-bundled`
-                                          # 3. verify-install.sh as the acceptance gate — any FAIL
-                                          #    not named with --allow-fail exits 1
+                                          # 3. verify-install.sh as the acceptance gate — any FAIL not named
+                                          #    with --allow-fail, or a verifier exit its FAIL rows do not
+                                          #    explain (crash, missing script), exits 1
 bash onboard-agents.sh --check            # existing machine: verify-only (steps 2 + 3)
-bash onboard-agents.sh --allow-fail Cursor  # accept a KNOWN pre-onboarding gap; record it in the machine card
+bash onboard-agents.sh --allow-fail 'Cursor permissions.json not found' \
+                       --allow-fail 'Immutable flag not set (Cursor is installed): /Users/guru/.cursor/mcp.json'
+                                          # accept KNOWN pre-onboarding gaps ONE LINE EACH, by an exact
+                                          # substring; every accepted line is printed — record each in the
+                                          # machine card. A broad word like `Cursor` would accept every
+                                          # Cursor FAIL at once, which is masking, not accepting.
 ```
 
 Step 2 lives in the knowfleet repo (`harness/hermes/install-gate.sh`; set
@@ -644,9 +652,15 @@ Where the harness differs, the layer differs — say so in the machine card:
 
 | Platform | Applies | Does not apply | Watch for |
 |---|---|---|---|
-| macOS (kimchi, laksa) | 0a, 0b, 0c–0e, 0f, 0g, 0h, 1–3 | — | restart pi hosts / Hermes gateways after install |
-| Linux (bingsu) | 0a (`/etc/claude-code/managed-settings.json`), 0b, 0f, 1, 2 | 0h (`sandbox-exec`), Cursor, Homebrew | pi on Linux stays **unsandboxed** until a bubblewrap port exists |
-| Unraid (rougamo) | as Linux, but `/etc` is rebuilt at boot | 0h, Cursor, Homebrew | re-apply root-owned files from `/boot/config/go`; agents run as **root**, which bypasses Layer 0f and makes any root-owned "ceiling" editable |
+| macOS (kimchi, laksa) | scripted: 0a, 0b, 0e, 0f, 0h, 1–3; manual: 0c (`chflags` lock ritual), 0g (Antigravity toggle) | — | restart pi hosts / Hermes gateways after install; 0c/0g still FAIL the gate until done by hand |
+| Linux (bingsu) | 0a (`/etc/claude-code/managed-settings.json`), 0b, 0f, 1, 2 | 0h (`sandbox-exec`), Cursor 0c–0e, Homebrew — `harden-deps.sh` skips them on Linux, and `verify-install.sh` reports 0h as a WARN (not applicable) instead of a FAIL | pi on Linux stays **unsandboxed** until a bubblewrap port exists |
+| Unraid (rougamo) | as Linux, but `/etc` is rebuilt at boot | as Linux | re-apply root-owned files from `/boot/config/go`; agents run as **root**, which bypasses Layer 0f and makes any root-owned "ceiling" editable |
+
+Not everything is scripted: Layer 0c is a manual `chflags` ritual (the script
+only prints the commands) and Layer 0g is a toggle in Antigravity's own config
+that no script here sets. On a Mac with Cursor or Antigravity installed the
+acceptance gate FAILs on those until you do them by hand — the FAIL is the
+reminder, not a bug.
 
 The acceptance gate is deliberately strict: a machine whose verify run shows a
 FAIL is not onboarded, and a known gap has to be named on the command line —
@@ -658,7 +672,9 @@ After you've read [`harden-deps.sh`](./harden-deps.sh) and the
 [`managed-settings/`](./managed-settings/) templates it may install:
 ```bash
 less harden-deps.sh        # actually read it
-bash harden-deps.sh        # applies Layers 0a-0h (where the harness is installed) and 1-3; prompts for sudo once
+bash harden-deps.sh        # applies the scripted layers 0a, 0b, 0e, 0f, 0h (where the harness is installed)
+                           # and 1-3; prompts for sudo once; exits 1 if any layer fails to install.
+                           # 0c (chflags) and 0g (Antigravity) stay manual — see their sections.
 ```
 Layer 4 (`AGENTS.md`) is manual — project or global install per section above.
 Layer 0h's extension is installed only after its root half succeeds (it fails

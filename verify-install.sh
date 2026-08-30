@@ -445,7 +445,11 @@ if [[ -f "$PI_SANDBOX_PROFILE" && -x "$PI_SANDBOX_WRAPPER" && -f "$PI_SANDBOX_RG
   fi
 else
   if (( pi_installed )); then
-    fail "pi sandbox not installed (pi is installed): need $PI_SANDBOX_PROFILE, $PI_SANDBOX_WRAPPER and $PI_SANDBOX_RG"
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      fail "pi sandbox not installed (pi is installed): need $PI_SANDBOX_PROFILE, $PI_SANDBOX_WRAPPER and $PI_SANDBOX_RG"
+    else
+      warn "pi is installed but Layer 0h is not applicable on $(uname -s) (sandbox-exec is macOS-only) — pi runs UNSANDBOXED here"
+    fi
   else
     warn "pi sandbox not found: $PI_SANDBOX_DIR (pi not installed)"
   fi
@@ -467,7 +471,11 @@ if [[ -f "$PI_EXTENSION" ]]; then
   fi
 else
   if (( pi_installed )); then
-    fail "pi dependency-safety extension not installed (pi is installed): $PI_EXTENSION"
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      fail "pi dependency-safety extension not installed (pi is installed): $PI_EXTENSION"
+    else
+      warn "pi dependency-safety extension not applicable on $(uname -s) (it needs /etc/pi's sandbox-exec wrapper)"
+    fi
   else
     warn "pi dependency-safety extension not found: $PI_EXTENSION"
   fi
