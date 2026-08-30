@@ -11,6 +11,8 @@
 
 set -u
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 pass_count=0
 warn_count=0
 fail_count=0
@@ -145,16 +147,25 @@ if have codex; then
   # isolates the agent.
   # Deny path must be refused, control path must succeed — the two rows
   # together distinguish a working deny from a blanket lockdown.
-  probe_deny="$(codex sandbox --include-managed-config -P :workspace -C "$(pwd)" -- /bin/cat "$HOME/.ssh/oracle.pub" 2>&1)"
+  # Fixtures are created at runtime: a machine-specific file like
+  # ~/.ssh/<key>.pub may not exist, and cat's ENOENT is indistinguishable from
+  # a sandbox denial by exit code alone. The deny fixture sits under $HOME
+  # because the template's rules are ~/-rooted; the control is /etc/hosts,
+  # present on every macOS/Linux install. Deny must show the kernel's
+  # "Operation not permitted", not merely a non-zero status.
+  codex_probe_dir="$(mktemp -d "$HOME/.codex-probe.XXXXXX")"
+  printf 'PROBE=1\n' > "$codex_probe_dir/.env"
+  probe_deny="$(codex sandbox --include-managed-config -P :workspace -C "$(pwd)" -- /bin/cat "$codex_probe_dir/.env" 2>&1)"
   deny_rc=$?
-  probe_control="$(codex sandbox --include-managed-config -P :workspace -C "$(pwd)" -- /bin/cat "$HOME/.zshrc" 2>&1)"
+  probe_control="$(codex sandbox --include-managed-config -P :workspace -C "$(pwd)" -- /bin/cat /etc/hosts 2>&1)"
   control_rc=$?
-  if [[ "$deny_rc" -ne 0 && "$control_rc" -eq 0 ]]; then
-    pass "Codex deny_read binds: ~/.ssh denied, ~/.zshrc control readable"
+  rm -rf "$codex_probe_dir"
+  if [[ "$deny_rc" -ne 0 && "$probe_deny" == *"Operation not permitted"* && "$control_rc" -eq 0 ]]; then
+    pass "Codex deny_read binds: ~/**/.env fixture denied with EPERM, /etc/hosts control readable"
   elif [[ "$deny_rc" -eq 0 ]]; then
-    fail "Codex deny_read is inert: ~/.ssh/oracle.pub was readable in the sandbox"
+    fail "Codex deny_read is inert: a ~/**/.env fixture was readable in the sandbox"
   else
-    warn "Could not confirm Codex deny_read behaviour (deny_rc=$deny_rc control_rc=$control_rc)"
+    warn "Could not confirm Codex deny_read behaviour (deny_rc=$deny_rc control_rc=$control_rc: ${probe_deny:0:80})"
   fi
 else
   warn "codex command not found"
@@ -358,20 +369,36 @@ say "Layer 0h: pi sandbox"
 PI_SANDBOX_DIR="/etc/pi"
 PI_SANDBOX_PROFILE="$PI_SANDBOX_DIR/sandbox.sb"
 PI_SANDBOX_WRAPPER="$PI_SANDBOX_DIR/bash"
+PI_SANDBOX_RG="$PI_SANDBOX_DIR/ripgrep.conf"
 PI_EXTENSION="$HOME/.pi/agent/extensions/dependency-safety.ts"
+PI_EXTENSION_TEMPLATE="$SCRIPT_DIR/managed-settings/pi/dependency-safety.ts"
 if have pi; then
   pi_installed=1
 else
   pi_installed=0
 fi
 
-if [[ -f "$PI_SANDBOX_PROFILE" && -x "$PI_SANDBOX_WRAPPER" ]]; then
-  pass "pi sandbox profile and wrapper exist under $PI_SANDBOX_DIR"
-  for pi_file in "$PI_SANDBOX_PROFILE" "$PI_SANDBOX_WRAPPER"; do
-    if [[ -w "$pi_file" ]]; then
-      fail "pi sandbox file is writable by $(id -un): $pi_file — run: sudo chown root:wheel $pi_file"
+# The root-owned boundary is only a wall if root owns it AND nobody else can
+# write it — including the directory: a user-writable /etc/pi lets the agent
+# unlink a root-owned sandbox.sb and drop an allow-all profile in its place.
+# `-w` only reports the current user's effective access, so check owner and
+# mode bits explicitly. stat -f is BSD (macOS); Layer 0h is macOS-only.
+pi_root_artifact_ok() {
+  local path="$1" want_mode="$2" owner mode
+  owner="$(stat -f '%u' "$path" 2>/dev/null)" || return 1
+  mode="$(stat -f '%Lp' "$path" 2>/dev/null)" || return 1
+  [[ "$owner" == "0" && "$mode" == "$want_mode" ]]
+}
+
+if [[ -f "$PI_SANDBOX_PROFILE" && -x "$PI_SANDBOX_WRAPPER" && -f "$PI_SANDBOX_RG" ]]; then
+  pass "pi sandbox profile, wrapper and ripgrep config exist under $PI_SANDBOX_DIR"
+  for spec in "$PI_SANDBOX_DIR:755" "$PI_SANDBOX_WRAPPER:755" "$PI_SANDBOX_PROFILE:644" "$PI_SANDBOX_RG:644"; do
+    pi_file="${spec%%:*}"
+    pi_mode="${spec##*:}"
+    if pi_root_artifact_ok "$pi_file" "$pi_mode"; then
+      pass "pi sandbox artifact is root-owned mode $pi_mode: $pi_file"
     else
-      pass "pi sandbox file is not writable by the current user: $pi_file"
+      fail "pi sandbox artifact is not root-owned mode $pi_mode: $pi_file ($(stat -f '%Su:%Sg %Lp' "$pi_file" 2>/dev/null)) — run: sudo chown root:wheel $pi_file && sudo chmod $pi_mode $pi_file"
     fi
   done
 
@@ -414,20 +441,25 @@ if [[ -f "$PI_SANDBOX_PROFILE" && -x "$PI_SANDBOX_WRAPPER" ]]; then
   fi
 else
   if (( pi_installed )); then
-    fail "pi sandbox not installed (pi is installed): $PI_SANDBOX_PROFILE and $PI_SANDBOX_WRAPPER"
+    fail "pi sandbox not installed (pi is installed): need $PI_SANDBOX_PROFILE, $PI_SANDBOX_WRAPPER and $PI_SANDBOX_RG"
   else
     warn "pi sandbox not found: $PI_SANDBOX_DIR (pi not installed)"
   fi
 fi
 
+# The extension is the user-owned pointer to the root-owned wall. A stale,
+# edited or replaced copy is a gap, not a warning: compare it byte-for-byte
+# with this checkout's template, which is what the README installs.
 if [[ -f "$PI_EXTENSION" ]]; then
-  if file_contains "$PI_EXTENSION" "Layer 0h"; then
-    pass "pi dependency-safety extension installed: $PI_EXTENSION"
+  if [[ ! -f "$PI_EXTENSION_TEMPLATE" ]]; then
+    warn "pi extension template missing from this checkout ($PI_EXTENSION_TEMPLATE); cannot validate $PI_EXTENSION"
+  elif cmp -s "$PI_EXTENSION" "$PI_EXTENSION_TEMPLATE"; then
+    pass "pi dependency-safety extension matches the Layer 0h template: $PI_EXTENSION"
   else
-    warn "pi extension present but is not the Layer 0h template: $PI_EXTENSION"
+    fail "pi dependency-safety extension differs from the Layer 0h template (stale, edited or replaced): $PI_EXTENSION — re-copy managed-settings/pi/dependency-safety.ts and restart pi"
   fi
-  if [[ ! -f "$PI_SANDBOX_PROFILE" || ! -x "$PI_SANDBOX_WRAPPER" ]]; then
-    fail "pi extension installed without $PI_SANDBOX_DIR — pi's bash tool is fail-closed (disabled) until the root half is installed"
+  if [[ ! -f "$PI_SANDBOX_PROFILE" || ! -x "$PI_SANDBOX_WRAPPER" || ! -f "$PI_SANDBOX_RG" ]]; then
+    fail "pi extension installed without a complete $PI_SANDBOX_DIR — pi's bash and grep tools are fail-closed (disabled) until the root half is installed"
   fi
 else
   if (( pi_installed )); then

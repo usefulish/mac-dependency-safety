@@ -22,6 +22,16 @@
 ;; macOS 26.3.1 (verified 2026-08-30) — it is the same mechanism Codex's
 ;; sandbox and Antigravity's terminal sandbox use on macOS. Re-probe after
 ;; every macOS upgrade: verify-install.sh Layer 0h does exactly that.
+;;
+;; KNOWN HOLE — hard links that already exist. Every rule here matches a
+;; PATH; a hard link to ~/.ssh/id_rsa planted at an allowed path before the
+;; sandbox runs reads normally (verified 2026-08-30: `ln ~/.ssh/x.pub /tmp/hl`
+;; outside, `cat /tmp/hl` inside → rc 0). Creating such a link from INSIDE the
+;; sandbox is denied (the file-link rules below, and the read/write denies
+;; already refuse `ln` on these sources), pi's own tools cannot create hard
+;; links, and a hard link needs the same filesystem — so the hole requires
+;; prior local access. Symlinks are not a hole: the kernel resolves them
+;; before matching, so `cat /tmp/sl` → EPERM when /tmp/sl → ~/.ssh/x.
 
 (version 1)
 (allow default)
@@ -35,7 +45,7 @@
 (define (home-subpath rel)
   (subpath (string-append (param "HOME") rel)))
 
-(deny file-read* file-write*
+(deny file-read* file-write* file-link
   (home-subpath "/.ssh")
   (home-subpath "/.aws")
   (home-subpath "/.gnupg")
@@ -67,7 +77,7 @@
 (define (home-literal rel)
   (literal (string-append (param "HOME") rel)))
 
-(deny file-read-data
+(deny file-read-data file-link
   (home-literal "/.netrc")
   (home-literal "/.git-credentials")
   (home-literal "/.pypirc")
@@ -84,7 +94,7 @@
 ;;   .env, .env.local, .env.production …  (NOT .envelope, NOT my-environment)
 ;;   .envrc                               (direnv)
 ;;   .npmrc                               (registry tokens) — see exemption below
-(deny file-read-data
+(deny file-read-data file-link
   (regex #"(^|/)\.env(\.[^/]*)?$")
   (regex #"(^|/)\.envrc$")
   (regex #"(^|/)\.npmrc$"))

@@ -39,11 +39,20 @@
  *   - Parity costs: inside pi's bash, `gh` loses its auth (~/.config/gh is
  *     denied, exactly as under Codex Layer 0b), and `.env.example` is
  *     unreadable because 0a/0b deny `.env.*` and this layer matches them.
+ *   - KNOWN HOLE — pre-existing hard links. Seatbelt and this guard both
+ *     decide by path; a hard link to ~/.ssh/id_rsa that already sits at an
+ *     allowed path reads normally (verified 2026-08-30). Creating such a
+ *     link from inside the sandbox is denied (sandbox.sb), and pi's own
+ *     tools cannot create one, so the hole needs a link planted beforehand
+ *     on the same filesystem. Symlinks are NOT a hole: the kernel resolves
+ *     them before the deny applies, and the in-process guard checks both
+ *     the path as written and its resolved target.
  */
 
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	createBashToolDefinition,
@@ -100,28 +109,128 @@ function underDir(abs: string, dir: string): boolean {
 	return abs === dir || abs.startsWith(`${dir}/`);
 }
 
-/** Absolute, `~`-expanded, symlink-resolved where the path exists. */
-function canonical(path: string, cwd: string): string {
-	const expanded = path === "~" ? HOME : path.startsWith("~/") ? join(HOME, path.slice(2)) : path;
-	const abs = resolve(cwd, expanded);
-	try {
-		return realpathSync.native(abs);
-	} catch {
-		return abs;
+// pi's own path normalisation (utils/paths.js normalizePath with the options
+// the tools use: unicode spaces → " ", leading "@" stripped, "~" expanded,
+// file:// URLs converted). Not exported by the package, so mirrored here —
+// the guard must see the same path the tool will open.
+const UNICODE_SPACES = /[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g;
+function normalizeLikePi(input: string): string {
+	let p = input.replace(UNICODE_SPACES, " ");
+	if (p.startsWith("@")) p = p.slice(1);
+	if (p === "~") return HOME;
+	if (p.startsWith("~/")) return join(HOME, p.slice(2));
+	if (/^file:\/\//.test(p)) {
+		try {
+			return fileURLToPath(p);
+		} catch {
+			return p;
+		}
+	}
+	return p;
+}
+
+/**
+ * Resolve symlinks through the deepest EXISTING ancestor, so a not-yet-
+ * existing target under a symlinked parent (`/tmp/link/new-key` where
+ * /tmp/link → ~/.ssh) still lands on its real destination.
+ */
+function realpathDeep(abs: string): string {
+	let probe = abs;
+	const tail: string[] = [];
+	for (;;) {
+		try {
+			const real = realpathSync.native(probe);
+			return tail.length ? join(real, ...tail) : real;
+		} catch {
+			const parent = dirname(probe);
+			if (parent === probe) return abs;
+			tail.unshift(basename(probe));
+			probe = parent;
+		}
 	}
 }
 
-function readDenied(abs: string): string | undefined {
+/**
+ * Both views of a tool path: the absolute path as written (lexical) and its
+ * symlink-resolved destination. Every guard checks BOTH — a `.env` symlink
+ * whose target has a benign name is caught lexically, a benign name that
+ * points into ~/.ssh is caught by the resolved view.
+ */
+function views(path: string, cwd: string): string[] {
+	const lexical = resolve(cwd, normalizeLikePi(path));
+	const resolved = realpathDeep(lexical);
+	return resolved === lexical ? [lexical] : [lexical, resolved];
+}
+
+function readDeniedOne(abs: string): string | undefined {
 	if (DENIED_DIRS.some((d) => underDir(abs, d))) return "credential directory";
 	if (DENIED_FILES.includes(abs)) return "credential file";
 	if (DENIED_BASENAMES.some((re) => re.test(basename(abs)))) return "secret file pattern";
 	return undefined;
 }
 
-function writeDenied(abs: string): string | undefined {
+function writeDeniedOne(abs: string): string | undefined {
 	if (DENIED_DIRS.some((d) => underDir(abs, d))) return "credential directory";
 	if (WRITE_PROTECTED_DIRS.some((d) => underDir(abs, d))) return "dependency-safety extension directory";
 	return undefined;
+}
+
+function dirDeniedOne(abs: string): string | undefined {
+	return DENIED_DIRS.some((d) => underDir(abs, d)) ? "credential directory" : undefined;
+}
+
+function firstDenial(paths: string[], check: (abs: string) => string | undefined): string | undefined {
+	for (const p of paths) {
+		const why = check(p);
+		if (why) return why;
+	}
+	return undefined;
+}
+
+/**
+ * A user `glob` for the grep tool is passed to rg AFTER the config file, and
+ * rg's last matching glob wins — so `glob: "**"` re-includes every file the
+ * root-owned ripgrep.conf excluded (verified 2026-08-30: `rg --glob '**'`
+ * listed .env). Rather than parse rg's glob dialect exactly, reject any glob
+ * that would match a representative secret name; narrow globs (`*.ts`,
+ * `src/**`) pass untouched.
+ */
+const SECRET_SAMPLES = [
+	".env",
+	".env.local",
+	".envrc",
+	".npmrc",
+	".netrc",
+	".git-credentials",
+	".pypirc",
+	"auth.json",
+	".credentials.json",
+	"hosts.yml",
+	"config.json",
+	"id_rsa",
+	"id_ed25519",
+	"credentials",
+	"keystore",
+	"login.keychain-db",
+];
+function globReincludesSecrets(glob: string): boolean {
+	if (glob.startsWith("!")) return false; // an exclusion can only narrow further
+	const alternatives = glob.split(",").map((g) => g.trim()).filter(Boolean);
+	for (const alt of alternatives) {
+		const re = new RegExp(
+			`^${alt
+				.replace(/[.+^$()|[\]\\]/g, "\\$&")
+				.replace(/\{([^}]*)\}/g, (_m, inner: string) => `(?:${inner.split(",").map((x) => x.trim()).join("|")})`)
+				.replace(/\*\*\/?/g, "\u0000")
+				.replace(/\*/g, "[^/]*")
+				.replace(/\?/g, "[^/]")
+				.replace(/\u0000/g, ".*")}$`,
+		);
+		for (const name of SECRET_SAMPLES) {
+			if (re.test(name) || re.test(`dir/${name}`) || re.test(`${HOME}/.ssh/${name}`)) return true;
+		}
+	}
+	return false;
 }
 
 function denyResult(what: string, path: string, why: string) {
@@ -153,7 +262,13 @@ function shellSettings(): { commandPrefix?: string; shellPath?: string } {
 
 export default function (pi: ExtensionAPI) {
 	const settings = shellSettings();
-	if (settings.shellPath) process.env.PI_SANDBOX_INNER_SHELL = settings.shellPath;
+	// A user who already pointed settings.shellPath at the wrapper would make
+	// the wrapper exec itself under sandbox-exec forever; treat that as the
+	// default-shell case.
+	if (settings.shellPath && settings.shellPath !== WRAPPER) process.env.PI_SANDBOX_INNER_SHELL = settings.shellPath;
+	// Root-owned ripgrep policy for the grep tool. When it is missing the
+	// tool_call hook below blocks grep outright (fail closed) rather than
+	// letting rg run with whatever config the environment supplies.
 	if (existsSync(RG_CONFIG)) process.env.RIPGREP_CONFIG_PATH = RG_CONFIG;
 
 	// --- 1. bash: root-owned Seatbelt wrapper --------------------------------
@@ -202,8 +317,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: readPrompt.promptGuidelines,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const cwd = ctx?.cwd ?? process.cwd();
-			const abs = canonical(params.path, cwd);
-			const why = readDenied(abs);
+			const why = firstDenial(views(params.path, cwd), readDeniedOne);
 			if (why) return denyResult("read", params.path, why);
 			return createReadToolDefinition(cwd).execute(toolCallId, params, signal, onUpdate, ctx);
 		},
@@ -211,19 +325,36 @@ export default function (pi: ExtensionAPI) {
 
 	// --- 3/4. write/edit into, and grep/find/ls of, credential locations -------
 	pi.on("tool_call", (event, ctx) => {
-		const input = event.input as { path?: unknown };
-		if (typeof input?.path !== "string") return undefined;
-		const abs = canonical(input.path, ctx.cwd);
+		const input = event.input as { path?: unknown; glob?: unknown };
+		const tool = event.toolName;
+		if (tool !== "write" && tool !== "edit" && tool !== "grep" && tool !== "find" && tool !== "ls") return undefined;
+		// grep/find/ls default to the cwd when path is omitted — check that,
+		// never skip the guard.
+		const rawPath = typeof input?.path === "string" && input.path.length > 0 ? input.path : tool === "write" || tool === "edit" ? undefined : ".";
+		if (rawPath === undefined) return undefined;
+		const paths = views(rawPath, ctx.cwd);
 		let why: string | undefined;
-		if (event.toolName === "write" || event.toolName === "edit") {
-			why = writeDenied(abs);
-		} else if (event.toolName === "grep" || event.toolName === "find" || event.toolName === "ls") {
-			why = DENIED_DIRS.some((d) => underDir(abs, d)) ? "credential directory" : undefined;
+		if (tool === "write" || tool === "edit") {
+			why = firstDenial(paths, writeDeniedOne);
+		} else if (tool === "grep") {
+			if (!existsSync(RG_CONFIG)) {
+				why = `${RG_CONFIG} is missing, so grep is disabled (fail-closed); install per README §0h`;
+			} else {
+				// An explicit file operand puts rg in single-file mode where the
+				// config's --glob exclusions do not apply — so grep targets get the
+				// full read deny set, same as the read tool.
+				why = firstDenial(paths, readDeniedOne);
+				if (!why && typeof input.glob === "string" && globReincludesSecrets(input.glob)) {
+					why = `glob "${input.glob}" would re-include secret files excluded by ${RG_CONFIG}; narrow it or omit it`;
+				}
+			}
+		} else {
+			why = firstDenial(paths, dirDeniedOne);
 		}
 		if (!why) return undefined;
 		return {
 			block: true,
-			reason: `${LAYER}: ${event.toolName} on "${input.path}" denied — ${why}.`,
+			reason: `${LAYER}: ${tool} on "${rawPath}" denied — ${why}.`,
 		};
 	});
 }
