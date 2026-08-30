@@ -12,21 +12,24 @@
 #   1. harden-deps.sh          apply every layer this machine's harnesses
 #                              support (0a Claude Code, 0b Codex, 0f Hermes,
 #                              0h pi on macOS, Cursor templates, 1-3)
-#   2. install-gate.sh         copy the knowfleet-gate into EVERY Hermes
-#                              profile + global, and verify Hermes discovers
+#   2. install-gate.sh         copy the knowfleet-gate into every Hermes
+#                              profile + global (librarian excepted by policy,
+#                              record bab5e39a), and verify Hermes discovers
 #                              it (canonical: knowfleet repo, harness/hermes/)
 #   3. verify-install.sh       the acceptance gate — read-only, behavioural
-#                              probes; any FAIL not explicitly allowed makes
-#                              this script exit 1. Onboarding is not done
-#                              until it passes.
+#                              probes; any FAIL not explicitly allowed, and
+#                              any verifier exit not explained by its FAIL
+#                              rows, makes this script exit 1. Onboarding is
+#                              not done until it passes.
 #
 # Usage:
 #   bash onboard-agents.sh                      # full run (sudo once)
 #   bash onboard-agents.sh --check              # steps 2 (verify-only) + 3 only
-#   bash onboard-agents.sh --allow-fail 'Cursor'  # accept FAIL lines matching
-#                                              # a substring (repeatable) —
-#                                              # for KNOWN pre-onboarding gaps,
-#                                              # recorded in the machine card
+#   bash onboard-agents.sh --allow-fail 'Cursor permissions.json not found'
+#                                              # accept ONE known FAIL line by an
+#                                              # exact substring (repeat per line);
+#                                              # every accepted line is printed —
+#                                              # record each in the machine card
 #   KNOWFLEET_REPO=<dir>                        # where install-gate.sh lives
 #                                              # (default ~/Code/active/knowfleet)
 #   --skip-gate                                 # machine has no Hermes and no
@@ -105,12 +108,16 @@ fi
 # --- 3. Acceptance gate ------------------------------------------------------
 say "3/3 Acceptance: verify-install.sh"
 verify_out="$(bash "$SCRIPT_DIR/verify-install.sh" 2>&1)"
+verify_rc=$?
 printf '%s\n' "$verify_out"
 
-# Strip colour codes so patterns match plain text.
-plain="$(printf '%s\n' "$verify_out" | sed 's/\x1b\[[0-9;]*m//g')"
+# Strip colour codes so patterns match plain text. The ESC byte is injected
+# by bash ($'\e'), not by sed's escape parser, so BSD and GNU sed behave alike.
+esc=$'\e'
+plain="$(printf '%s\n' "$verify_out" | sed "s/${esc}\[[0-9;]*m//g")"
 fail_lines="$(printf '%s\n' "$plain" | grep '^  FAIL ' || true)"
 unexpected=""
+accepted_lines=""
 accepted=0
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
@@ -118,12 +125,17 @@ while IFS= read -r line; do
   for pat in "${allow_fail[@]:-}"; do
     [[ -n "$pat" && "$line" == *"$pat"* ]] && { matched=1; break; }
   done
-  if (( matched )); then accepted=$((accepted + 1)); else unexpected+="$line"$'\n'; fi
+  if (( matched )); then
+    accepted=$((accepted + 1)); accepted_lines+="$line"$'\n'
+  else
+    unexpected+="$line"$'\n'
+  fi
 done <<<"$fail_lines"
 
 say "Onboarding result"
 if (( accepted > 0 )); then
-  note "$accepted FAIL line(s) accepted as known pre-onboarding gaps (--allow-fail) — record them in the machine card"
+  note "$accepted FAIL line(s) accepted as known pre-onboarding gaps (--allow-fail) — record each in the machine card:"
+  printf '%s' "$accepted_lines" | sed 's/^/      /'
 fi
 if [[ -n "$unexpected" ]]; then
   bad "unaccepted FAIL(s):"
@@ -132,6 +144,21 @@ if [[ -n "$unexpected" ]]; then
 else
   ok "verify-install.sh: no unaccepted FAIL"
 fi
+# The verifier's exit status must be fully explained by the FAIL rows above:
+# 0 is clean, 1 is "at least one FAIL row" (acceptable only when every row was
+# accepted), anything else — a crash, an unbound variable, a missing script
+# (127) — proves nothing and must not onboard the machine.
+case "$verify_rc" in
+  0) ;;
+  1)
+    if [[ -z "$fail_lines" ]]; then
+      bad "verify-install.sh exited 1 without printing a FAIL row — treat as a broken verifier, not a pass"
+      overall=1
+    fi ;;
+  *)
+    bad "verify-install.sh exited $verify_rc (abnormal termination or missing script) — no acceptance without a complete run"
+    overall=1 ;;
+esac
 if (( overall )); then
   echo
   echo "  NOT onboarded. Fix the items above (or name a genuinely pre-existing one with --allow-fail) and re-run."
