@@ -282,6 +282,11 @@ ran with `.env` excluded. A2A child sessions load the same global extension
 set but were not exercised (the host needs a restart first).
 
 ### 0c. Cursor settings (a speed bump, not a wall)
+> **Temp-worker note (2026-08-30, decision `c983f950`):** on this fleet Cursor is
+> a temporary worker, not a durable host, so its Layer 0c/0d gaps are **accepted
+> debt** — `verify-install.sh` reports the immutable-flag gaps as WARN
+> (ACCEPTED-DEBT) via `CURSOR_TEMP_WORKER=1` until Cursor becomes permanent.
+
 Cursor stores its settings in user-writable JSON files. A malicious `postinstall`
 script can `sed` these to enable bypass modes. Setting your safety defaults and
 then making the file **immutable** raises the bar — but be honest about how high.
