@@ -337,6 +337,106 @@ else
   warn "Antigravity not installed; layer 0g not applicable"
 fi
 
+say "Layer 0h: pi sandbox"
+
+# pi (earendil-works/pi-coding-agent) ships no sandbox and no managed
+# settings; its bash/read/write tools run with the user's full permissions.
+# Layer 0h is two halves: a ROOT-owned /etc/pi (Seatbelt profile, bash
+# wrapper, ripgrep config) that the kernel enforces, and a USER-owned
+# extension in ~/.pi/agent/extensions that points pi's tools at it. Only the
+# root half is a wall; the extension is a pointer (delete it, or start
+# `pi --no-extensions`, and the session is unsandboxed), so both are checked.
+#
+# The probes below run the REAL wrapper — a sandboxed read installs and
+# changes nothing — and assert both directions plus one interaction:
+#   deny path must fail with EPERM ("Operation not permitted", i.e. the kernel
+#   refused, not a shell error), a benign near-miss (.envelope) and a control
+#   (/etc/hosts) must succeed, and npm must report the same ignore-scripts
+#   inside the sandbox as outside — a ~/.npmrc read-deny silently flips it to
+#   false and hands install scripts back to Layer 1's attacker.
+# Probe fixtures are created at runtime so nothing here reads a real secret.
+PI_SANDBOX_DIR="/etc/pi"
+PI_SANDBOX_PROFILE="$PI_SANDBOX_DIR/sandbox.sb"
+PI_SANDBOX_WRAPPER="$PI_SANDBOX_DIR/bash"
+PI_EXTENSION="$HOME/.pi/agent/extensions/dependency-safety.ts"
+if have pi; then
+  pi_installed=1
+else
+  pi_installed=0
+fi
+
+if [[ -f "$PI_SANDBOX_PROFILE" && -x "$PI_SANDBOX_WRAPPER" ]]; then
+  pass "pi sandbox profile and wrapper exist under $PI_SANDBOX_DIR"
+  for pi_file in "$PI_SANDBOX_PROFILE" "$PI_SANDBOX_WRAPPER"; do
+    if [[ -w "$pi_file" ]]; then
+      fail "pi sandbox file is writable by $(id -un): $pi_file — run: sudo chown root:wheel $pi_file"
+    else
+      pass "pi sandbox file is not writable by the current user: $pi_file"
+    fi
+  done
+
+  pi_probe_dir="$(mktemp -d)"
+  printf 'PROBE=1\n' > "$pi_probe_dir/.env"
+  printf 'benign\n' > "$pi_probe_dir/.envelope"
+  pi_deny_out="$("$PI_SANDBOX_WRAPPER" -c "ls \"$HOME/.ssh\"" 2>&1)"
+  pi_deny_rc=$?
+  pi_env_out="$("$PI_SANDBOX_WRAPPER" -c "cat \"$pi_probe_dir/.env\"" 2>&1)"
+  pi_env_rc=$?
+  "$PI_SANDBOX_WRAPPER" -c "cat \"$pi_probe_dir/.envelope\"" >/dev/null 2>&1
+  pi_benign_rc=$?
+  "$PI_SANDBOX_WRAPPER" -c "cat /etc/hosts" >/dev/null 2>&1
+  pi_control_rc=$?
+  rm -rf "$pi_probe_dir"
+
+  if [[ "$pi_deny_rc" -ne 0 && "$pi_deny_out" == *"Operation not permitted"* ]]; then
+    pass "pi sandbox denies ~/.ssh with EPERM"
+  else
+    fail "pi sandbox did not deny ~/.ssh with EPERM (rc=$pi_deny_rc: ${pi_deny_out:0:80})"
+  fi
+  if [[ "$pi_env_rc" -ne 0 && "$pi_env_out" == *"Operation not permitted"* ]]; then
+    pass "pi sandbox denies .env with EPERM"
+  else
+    fail "pi sandbox did not deny .env with EPERM (rc=$pi_env_rc: ${pi_env_out:0:80})"
+  fi
+  if [[ "$pi_benign_rc" -eq 0 && "$pi_control_rc" -eq 0 ]]; then
+    pass "pi sandbox leaves benign reads alone (.envelope, /etc/hosts)"
+  else
+    fail "pi sandbox is over-broad or broken (benign_rc=$pi_benign_rc control_rc=$pi_control_rc)"
+  fi
+  if have npm; then
+    pi_npm_outside="$(cd / && npm config get ignore-scripts 2>/dev/null)"
+    pi_npm_inside="$("$PI_SANDBOX_WRAPPER" -c "cd / && npm config get ignore-scripts" 2>/dev/null)"
+    if [[ -n "$pi_npm_inside" && "$pi_npm_inside" == "$pi_npm_outside" ]]; then
+      pass "npm reports the same ignore-scripts inside the pi sandbox ($pi_npm_inside) — Layer 1 intact"
+    else
+      fail "Layer 1 defeated inside the pi sandbox: ignore-scripts is '${pi_npm_inside:-<none>}' inside vs '$pi_npm_outside' outside — ~/.npmrc must stay readable"
+    fi
+  fi
+else
+  if (( pi_installed )); then
+    fail "pi sandbox not installed (pi is installed): $PI_SANDBOX_PROFILE and $PI_SANDBOX_WRAPPER"
+  else
+    warn "pi sandbox not found: $PI_SANDBOX_DIR (pi not installed)"
+  fi
+fi
+
+if [[ -f "$PI_EXTENSION" ]]; then
+  if file_contains "$PI_EXTENSION" "Layer 0h"; then
+    pass "pi dependency-safety extension installed: $PI_EXTENSION"
+  else
+    warn "pi extension present but is not the Layer 0h template: $PI_EXTENSION"
+  fi
+  if [[ ! -f "$PI_SANDBOX_PROFILE" || ! -x "$PI_SANDBOX_WRAPPER" ]]; then
+    fail "pi extension installed without $PI_SANDBOX_DIR — pi's bash tool is fail-closed (disabled) until the root half is installed"
+  fi
+else
+  if (( pi_installed )); then
+    fail "pi dependency-safety extension not installed (pi is installed): $PI_EXTENSION"
+  else
+    warn "pi dependency-safety extension not found: $PI_EXTENSION"
+  fi
+fi
+
 say "Layer 0.5: Immutable config files"
 
 CURSOR_SETTINGS="$HOME/Library/Application Support/Cursor/User/settings.json"
