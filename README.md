@@ -118,6 +118,24 @@ Hard constraints, both probed (d0b38a31):
 - `default_permissions` in requirements is not required once the allowlist
   includes both `:workspace` and `:read-only`.
 
+#### Known gap: Layer 1 does not hold inside the Codex sandbox
+
+The managed `deny_read` includes `~/.npmrc`, so npm treats the user config as
+absent and `npm config get ignore-scripts` reads `false` inside a Codex
+sandbox (`true` outside) — measured 2026-08-30 on codex-cli 0.150.1 (task
+#284, follow-up to 6c36a197). This is accepted, not an oversight: the deny
+cannot be narrowed. `~/**/.npmrc` matches `~/.npmrc` itself (zero-segment
+glob — `~/**/.env` was probed denying `~/.env`), no `allow_read` override key
+exists, and a `-c` override cannot weaken the managed list; the only way to
+exempt the home file would also exempt every project `.npmrc` under `~`.
+`verify-install.sh` Layer 0b reports the inside/outside disagreement as a WARN
+canary — if it ever reports agreement, codex-cli changed behaviour and the
+exemption decision should be revisited. Two more measured edges: `-c
+permissions.filesystem.deny_read=[...]` is **inert** unless
+`--include-managed-config` is also passed (a standalone `-c` deny list binds
+nothing), and the `~`-rooted globs do not cover `.npmrc` outside `$HOME`
+(e.g. a checkout under `/tmp`) — pi's Layer 0h regex does.
+
 ### 0f. Hermes managed scope
 File: `/etc/hermes/config.yaml`
 (template: [`managed-settings/hermes.yaml`](./managed-settings/hermes.yaml))
@@ -248,8 +266,11 @@ alone disables pi's bash tool until `/etc/pi` exists.
   silently reports `ignore-scripts=false` and runs install scripts again
   (verified 2026-08-30). Project-local `.npmrc` files are still denied, and pi's
   `read` tool denies `~/.npmrc` regardless. Codex's Layer 0b denies `~/.npmrc`
-  sandbox-wide — check whether npm inside a Codex sandbox still honours Layer 1
-  before relying on it there.
+  sandbox-wide, so **Layer 1 does NOT hold inside a Codex sandbox** — measured
+  2026-08-30 (`npm config get ignore-scripts` → `false` in-sandbox, `true`
+  outside). Accepted: the deny cannot be narrowed (`~/**/.npmrc` matches
+  `~/.npmrc` itself; no allow key; `-c` cannot weaken managed config), and
+  verify-install.sh Layer 0b watches the gap as a canary row.
 - Parity costs, same as Codex: `gh` inside pi's bash loses its auth
   (`~/.config/gh` is denied), and `.env.example` is unreadable because 0a/0b
   deny `.env.*` and this layer matches them. Run `gh` from your own shell.

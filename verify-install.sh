@@ -171,6 +171,29 @@ if have codex; then
   else
     warn "Could not confirm Codex deny_read behaviour (deny_rc=$deny_rc control_rc=$control_rc: ${probe_deny:0:80})"
   fi
+
+  # Layer 1 interaction (6c36a197 follow-up, task #284, measured 2026-08-30
+  # on codex-cli 0.150.1): the managed deny on ~/.npmrc makes npm treat the
+  # user config as absent, so `npm config get ignore-scripts` reads FALSE
+  # inside the Codex sandbox while reading true outside — Layer 1's guard is
+  # silently gone for any install run in-sandbox. ACCEPTED for now because
+  # the deny cannot be narrowed: `~/**/.npmrc` itself matches `~/.npmrc`
+  # (zero-segment glob, probed live), no allow_read override key exists, and
+  # a -c override cannot weaken the managed list — exempting the home file
+  # would also exempt every project .npmrc under ~. WARN, not FAIL; this row
+  # is the canary — if it ever flips to the pass line, codex-cli changed
+  # something and the exemption decision should be re-evaluated.
+  if have npm; then
+    codex_npm_outside="$(cd / && npm config get ignore-scripts 2>/dev/null)"
+    codex_npm_inside="$(codex sandbox --include-managed-config -P :workspace -C "$(pwd)" -- npm config get ignore-scripts 2>/dev/null)"
+    if [[ "$codex_npm_inside" != "true" && "$codex_npm_inside" != "false" ]]; then
+      warn "Could not read npm ignore-scripts inside the Codex sandbox (got '${codex_npm_inside:-<none>}' — e.g. sandbox-exec could not nest inside another sandbox)"
+    elif [[ "$codex_npm_inside" == "$codex_npm_outside" ]]; then
+      pass "npm reports the same ignore-scripts inside the Codex sandbox ($codex_npm_inside) — Layer 1 intact"
+    else
+      warn "npm ignore-scripts is '$codex_npm_inside' inside the Codex sandbox vs '$codex_npm_outside' outside — ~/.npmrc is deny_read (accepted gap: Layer 1 not enforced in-sandbox; not narrowable on codex-cli 0.150.1)"
+    fi
+  fi
 else
   warn "codex command not found"
 fi
