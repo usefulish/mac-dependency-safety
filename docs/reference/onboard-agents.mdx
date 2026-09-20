@@ -1,0 +1,162 @@
+---
+title: "onboard-agents.sh"
+description: "Sandbox a machine's AI agents by default, then prove it — the three-step fleet onboarding wrapper and its acceptance gate."
+---
+
+Sandboxes a machine's AI agents **by default**, then proves it. This is the fleet onboarding
+step for agent harnesses: it applies the layer stack, gates every Hermes profile, and ends on
+[`verify-install.sh`](/reference/verify-install) as an acceptance gate.
+
+```bash
+bash onboard-agents.sh
+```
+
+Run it as the user the agents run as. Managed files are root-owned, but the user-owned halves
+(the pi extension, Cursor files) land in that user's `$HOME`.
+
+## The three steps
+
+<Steps>
+  <Step title="Layer stack">
+    Runs `bash harden-deps.sh` — every layer this machine's harnesses support (0a Claude Code,
+    0b Codex, 0f Hermes, 0h pi on macOS, Cursor templates, 1–3). A non-zero exit marks the
+    overall run failed. Skipped in `--check` mode.
+  </Step>
+  <Step title="knowfleet-gate in every Hermes profile">
+    Runs `$KNOWFLEET_REPO/harness/hermes/install-gate.sh --all --global` (with `--check`
+    prepended in check mode) to copy the knowfleet-gate into every Hermes profile plus global —
+    `librarian` excepted by recorded policy (`bab5e39a`) — and verify Hermes actually discovers
+    it.
+
+    Skipped with a note if `hermes` is not installed, or if you passed `--skip-gate`. If the
+    installer is not executable at the expected path, the run fails with a message telling you
+    to clone the knowfleet repo or set `KNOWFLEET_REPO`.
+  </Step>
+  <Step title="Acceptance gate">
+    Runs `bash verify-install.sh`, captures both its output and its exit status, and prints the
+    output verbatim. Any `FAIL` row not explicitly accepted with `--allow-fail`, and any
+    verifier exit status its FAIL rows do not explain, makes the script exit 1.
+  </Step>
+</Steps>
+
+## Usage
+
+```bash
+bash onboard-agents.sh                      # full run (sudo once)
+bash onboard-agents.sh --check              # steps 2 (verify-only) + 3 only
+bash onboard-agents.sh --allow-fail 'Cursor permissions.json not found'
+                                           # accept ONE known FAIL line by an
+                                           # exact substring (repeat per line);
+                                           # every accepted line is printed —
+                                           # record each in the machine card
+KNOWFLEET_REPO=<dir>                        # where install-gate.sh lives
+                                           # (default ~/Code/active/knowfleet)
+--skip-gate                                 # machine has no Hermes and no
+                                           # knowfleet checkout
+```
+
+## Flags
+
+<ParamField path="--check" type="flag">
+  Verify only. Skips `harden-deps.sh` entirely and passes `--check` to the gate installer, so
+  nothing is applied — steps 2 and 3 run read-only. This is the mode for machines already in
+  the fleet.
+</ParamField>
+
+<ParamField path="--skip-gate" type="flag">
+  Skip step 2 entirely. Use on a machine with no Hermes and no knowfleet checkout. Without it,
+  a machine that has no `hermes` on `PATH` prints a note rather than failing — the flag just
+  silences that note.
+</ParamField>
+
+<ParamField path="--allow-fail <substring>" type="string" required={false}>
+  Accept one known pre-onboarding FAIL line by exact substring match. Repeatable — pass it once
+  per line you are accepting. Every accepted line is printed back under
+  "FAIL line(s) accepted as known pre-onboarding gaps", so it lands in the run log and can be
+  copied into the machine card.
+
+  The argument is mandatory: `--allow-fail` with nothing after it aborts with
+  `--allow-fail needs a pattern`.
+
+  Use the narrowest substring that identifies the row. A broad word like `Cursor` would accept
+  every Cursor FAIL at once, which is masking, not accepting.
+</ParamField>
+
+<ParamField path="-h, --help" type="flag">
+  Prints the script's own header comment (lines 2–40, with the leading `# ` stripped) and exits
+  0.
+</ParamField>
+
+Any other argument exits 2 with `unknown argument: <arg>`.
+
+## Environment variables
+
+<ParamField path="KNOWFLEET_REPO" type="path" default="$HOME/Code/active/knowfleet">
+  Where the knowfleet checkout lives. The gate installer is expected at
+  `$KNOWFLEET_REPO/harness/hermes/install-gate.sh` and must be executable.
+</ParamField>
+
+<ParamField path="HOME" type="path">
+  Used for the `KNOWFLEET_REPO` default. Everything else inherits `$HOME` through the scripts it
+  calls.
+</ParamField>
+
+Variables consumed by the scripts it invokes — `CURSOR_TEMP_WORKER` and `HERMES_MANAGED_DIR`
+for [`verify-install.sh`](/reference/verify-install) — are passed through the environment as
+usual; `onboard-agents.sh` does not set or read them itself.
+
+## What it changes on the system
+
+Nothing directly. Every filesystem change comes from the scripts it calls:
+
+- [`harden-deps.sh`](/reference/harden-deps) in step 1 (skipped under `--check`).
+- The knowfleet repo's `install-gate.sh` in step 2, which writes into Hermes profiles (and is
+  read-only under `--check`).
+- [`verify-install.sh`](/reference/verify-install) in step 3 changes nothing by design. Its
+  probes create and delete their own temporary fixtures.
+
+**To undo an onboarding run, undo the layers** — the per-layer instructions are in
+[`harden-deps.sh`](/reference/harden-deps). Removing the knowfleet-gate is a knowfleet-repo
+operation, not something this script offers.
+
+## How the acceptance gate decides
+
+The verifier's ANSI colour codes are stripped (with a bash-injected ESC byte, so BSD and GNU
+`sed` behave alike), then every line starting with `  FAIL ` is collected and partitioned into
+accepted and unexpected.
+
+The exit status must be fully explained by those rows:
+
+| `verify-install.sh` exit | Treated as |
+|---|---|
+| 0 | Clean |
+| 1 | Acceptable only if at least one FAIL row was printed *and* every row was accepted. Exit 1 with no FAIL row is reported as a broken verifier, not a pass. |
+| anything else | Abnormal termination or missing script (for example 127). No acceptance without a complete run. |
+
+## Output
+
+On failure:
+
+```text
+  NOT onboarded. Fix the items above (or name a genuinely pre-existing one with --allow-fail) and re-run.
+```
+
+and exit 1.
+
+On success it prints that the machine's agents are sandboxed by default, and reminds you to
+restart running harness processes (pi hosts, Hermes gateways) and then re-run
+`bash onboard-agents.sh --check`.
+
+## Platform notes
+
+Verified 2026-08-30:
+
+- **Linux:** 0a/0b/0f/1/2 apply (Claude Code reads `/etc/claude-code/managed-settings.json`);
+  0h (`sandbox-exec`) and the Cursor layers are macOS-only, so pi on Linux stays unsandboxed
+  and the script says so.
+- **Unraid** rebuilds `/etc` at boot: root-owned layers must be re-applied from
+  `/boot/config/go` or they vanish on the next reboot. Agents there run as root, which bypasses
+  Hermes [Layer 0f](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices) entirely.
+
+See [Fleet onboarding](/guides/fleet-onboarding) for the full matrix and the reasoning behind
+the strict gate.

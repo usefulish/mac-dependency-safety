@@ -1,0 +1,83 @@
+---
+title: "Layer 4 — Agent defaults (soft)"
+description: "One AGENTS.md that nudges Claude Code, Codex and Cursor toward lockfile and MCP hygiene. A default, not a control — agents can ignore it and malware never reads it."
+---
+
+A shared instruction file that nudges AI coding agents (Claude Code, Cursor, Codex) toward the
+[Layer 1](/guides/layer-1-npm) lockfile hygiene (`npm ci` by default, `npm install <pkg>` only
+to add/bump) and [Layer 0d](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices) MCP
+hygiene (no new servers unless asked).
+
+<Warning>
+**Softest layer in the repo — a default, not a control.** Agents usually follow these
+instructions; they can also ignore them, and malware doesn't read them at all. Layer 0
+*distrusts* the agent and hard-blocks it; this layer *cooperates* with the agent and asks
+nicely. Don't mistake one for the other. This is a sibling to Layer 1's npm guidance, not to
+Layer 0's enforcement.
+</Warning>
+
+## One file, three tools
+
+`AGENTS.md` is read natively by Codex and Cursor; Claude Code pulls it in via its `@import`
+syntax. Write the rule once (template: `agent-instructions/AGENTS.md`), import it everywhere —
+no three-way drift.
+
+The shipped rules are:
+
+- Default to `npm ci` — authoritative install from `package-lock.json`; fails on drift.
+- Use `npm install <pkg>` ONLY to deliberately add or bump a dependency (it rewrites the
+  lockfile).
+- Never run a bare `npm install` (no package name) to "refresh" or update deps unless the user
+  explicitly asked — it silently mutates the lockfile.
+- Keep `package-lock.json` committed; never gitignore it.
+- pnpm → `pnpm install --frozen-lockfile`; yarn → `yarn install --immutable`. Same idea.
+- Treat unexpected native npm builds (`binding.gyp`, `node-gyp`, or similar) as risky; ask
+  before running rebuilds or troubleshooting native install failures.
+- Do not add or loosen package publish tokens, CI release secrets, or registry settings unless
+  the user explicitly asked.
+- Do not add MCP servers or edit `.cursor/mcp.json` unless the user explicitly asked.
+
+## Project scope (per repo — the clean case)
+
+Drop the file at your repo root and point the two import-based tools at it:
+
+```bash
+cp agent-instructions/AGENTS.md ./AGENTS.md     # Codex + Cursor read this directly
+grep -qF '@AGENTS.md' ./CLAUDE.md 2>/dev/null || printf '@AGENTS.md\n' >> ./CLAUDE.md
+```
+
+Commit both. Anyone opening the repo in any of the three tools gets the same default. The
+`grep -qF` guard makes the second command re-runnable — without it, every run appends another
+import line.
+
+## Global scope (default across all your projects)
+
+Each tool has its own home dir; point them all at one canonical copy:
+
+```bash
+mkdir -p ~/.config/agent-instructions
+cp agent-instructions/AGENTS.md ~/.config/agent-instructions/AGENTS.md
+AGENTS="$HOME/.config/agent-instructions/AGENTS.md"
+
+ln -sf "$AGENTS" ~/.codex/AGENTS.md              # Codex reads it natively
+# Append once — re-running duplicates the import line. Check the file first:
+grep -qF "@$AGENTS" ~/.claude/CLAUDE.md 2>/dev/null || printf '@%s\n' "$AGENTS" >> ~/.claude/CLAUDE.md
+```
+
+**Cursor is the holdout:** its global rules live in Settings → Rules (a UI field, not a file),
+so paste the rule there by hand. It's five lines.
+
+<Note>
+Formats drift and not every version's `@import` takes an absolute path. If an import doesn't
+resolve, symlink the tool's file to the canonical one or just paste the five lines in — then
+confirm it actually loaded (Claude Code: `/memory`; Codex: it echoes the instruction files it
+read on start).
+</Note>
+
+## Not scripted
+
+[`harden-deps.sh`](/reference/harden-deps) does **not** install Layer 4. It prints a reminder
+at the end of its run, but the copy is manual — project or global, per the sections above.
+[`verify-install.sh`](/reference/verify-install) does not check for it either.
+
+Loosen: delete the stub/import line, or the rule block inside `AGENTS.md`.

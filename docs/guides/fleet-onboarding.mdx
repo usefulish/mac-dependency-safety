@@ -1,0 +1,83 @@
+---
+title: "Fleet onboarding: sandbox by default"
+description: "Make a new machine's agents sandboxed because it was onboarded, not retrofitted later — with an acceptance gate that refuses to pass on unexplained failures."
+---
+
+A new machine's agents should be sandboxed *because it was onboarded*, not retrofitted later.
+[`onboard-agents.sh`](/reference/onboard-agents) is the agent-harness step of the fleet's
+machine-onboarding process (reference card `machine-onboarding.md`, Phase 4.5) and it ends on
+checks that bind, not on files being present.
+
+## The three steps
+
+```bash
+bash onboard-agents.sh                    # 1. harden-deps.sh (every scripted layer this box supports; sudo once;
+                                          #    exits 1 if any layer fails to install)
+                                          # 2. knowfleet-gate into every Hermes profile + global — except
+                                          #    `librarian`, ungated by recorded human decision (bab5e39a) —
+                                          #    verified via `hermes -p <p> plugins list --plain --no-bundled`
+                                          # 3. verify-install.sh as the acceptance gate — any FAIL not named
+                                          #    with --allow-fail, or a verifier exit its FAIL rows do not
+                                          #    explain (crash, missing script), exits 1
+bash onboard-agents.sh --check            # existing machine: verify-only (steps 2 + 3)
+bash onboard-agents.sh --allow-fail 'Cursor permissions.json not found' \
+                       --allow-fail 'Immutable flag not set (Cursor is installed): /Users/guru/.cursor/mcp.json'
+                                          # accept KNOWN pre-onboarding gaps ONE LINE EACH, by an exact
+                                          # substring; every accepted line is printed — record each in the
+                                          # machine card. A broad word like `Cursor` would accept every
+                                          # Cursor FAIL at once, which is masking, not accepting.
+```
+
+Run it as the user the agents run as: managed files are root-owned, but the user-owned halves
+(the pi extension, Cursor files) land in that user's `$HOME`.
+
+## Why step 2 verifies discovery, not config
+
+Step 2 lives in the knowfleet repo (`harness/hermes/install-gate.sh`; set `KNOWFLEET_REPO` if
+it is not at `~/Code/active/knowfleet`) because that is where the canonical plugin lives.
+
+It verifies discovery rather than config because a `plugins.enabled: [knowfleet-gate]` entry
+with no plugin files is inert and looks healthy — four profiles ran ungated that way (record
+`1abe4c95`). Only Hermes's own `plugins list` proves the plugin loads.
+
+If the machine has no Hermes and no knowfleet checkout, pass `--skip-gate`.
+
+## Per-platform matrix
+
+Where the harness differs, the layer differs — say so in the machine card.
+
+| Platform | Applies | Does not apply | Watch for |
+|---|---|---|---|
+| macOS (kimchi, laksa) | scripted: 0a, 0b, 0e, 0f, 0h, 1–3; manual: 0c (`chflags` lock ritual), 0g (Antigravity toggle) | — | restart pi hosts / Hermes gateways after install; 0c/0g still FAIL the gate until done by hand |
+| Linux (bingsu) | 0a (`/etc/claude-code/managed-settings.json`), 0b, 0f, 1, 2 | 0h (`sandbox-exec`), Cursor 0c–0e, Homebrew — `harden-deps.sh` skips them on Linux, and `verify-install.sh` reports 0h as a WARN (not applicable) instead of a FAIL | pi on Linux stays **unsandboxed** until a bubblewrap port exists |
+| Unraid (rougamo) | as Linux, but `/etc` is rebuilt at boot | as Linux | re-apply root-owned files from `/boot/config/go`; agents run as **root**, which bypasses Layer 0f and makes any root-owned "ceiling" editable |
+
+## What is not scripted
+
+Layer 0c is a manual `chflags` ritual (the script only prints the commands) and Layer 0g is a
+toggle in Antigravity's own config that no script here sets. On a Mac with Cursor or
+Antigravity installed the acceptance gate FAILs on those until you do them by hand — the FAIL
+is the reminder, not a bug.
+
+## Why the gate is strict
+
+A machine whose verify run shows a FAIL is not onboarded, and a known gap has to be named on
+the command line — which is the moment to write it into the machine card rather than forget it.
+
+`--allow-fail` matches by exact substring against one FAIL line. Use the narrowest substring
+that identifies the row. A broad word like `Cursor` would accept every Cursor FAIL at once,
+which is masking, not accepting.
+
+The script also refuses any verifier exit status its FAIL rows do not explain. Exit 0 is clean;
+exit 1 is acceptable only when every FAIL row was accepted; anything else — a crash, an unbound
+variable, a missing script (127) — proves nothing and does not onboard the machine.
+
+## After a successful run
+
+Restart running harness processes (pi hosts, Hermes gateways), then re-run:
+
+```bash
+bash onboard-agents.sh --check
+```
+
+Full flag reference: [`onboard-agents.sh`](/reference/onboard-agents).

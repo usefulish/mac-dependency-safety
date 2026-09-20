@@ -1,0 +1,117 @@
+---
+title: "Overview"
+description: "Opinionated, macOS-only hardening that shrinks the blast radius of installing untrusted npm, pip and Homebrew packages — and stops malware weaponizing your AI coding agents."
+---
+
+`mac-dependency-safety` is a set of defaults for macOS developers who install a lot of
+packages and run a lot of AI coding agents. It blocks the easiest install-script and
+agent-bypass failure modes, makes risky dependency changes more visible, and adds friction
+around the paths where your secrets live.
+
+It is a pragmatic **something rather than nothing** baseline. It is not a sandbox, and it
+does not make untrusted packages safe.
+
+<Warning>
+**Read before running anything here.** This repo exists because package managers run
+arbitrary code as you at install time. Piping a stranger's setup script into your shell to
+defend against *that* is self-defeating. The README — and this documentation — is the
+deliverable: every step is a hand-runnable command. [`harden-deps.sh`](/reference/harden-deps)
+is a convenience that does exactly what is documented and nothing more. Read it, then decide.
+</Warning>
+
+## The problem
+
+In August 2025, compromised `nx` npm packages shipped a `postinstall` hook that harvested SSH
+keys, `.env` files, and GitHub/npm tokens — and, novelly, invoked locally installed AI CLIs
+(`claude --dangerously-skip-permissions`, `gemini --yolo`, `q --trust-all-tools`) to do the
+filesystem recon for it. It was live for roughly five hours before removal.
+
+Two things made that work: npm lifecycle scripts run arbitrary code as you, and AI coding
+agents shipped user-overridable bypass flags that any script running as you could invoke.
+This repo is the set of defaults that would have blunted it. See
+[Why (the nx hack)](/guides/why-the-nx-hack).
+
+## What you get
+
+The controls are organised as layers. Higher-numbered layers are softer.
+
+<Columns cols={2}>
+  <Card title="Layer 0 — Agent enforcement" href="/guides/layer-0-stop-ai-agents-being-turned-into-accomplices">
+    Root-owned managed settings for Claude Code, Codex, Hermes and pi that no user or project
+    config can override, plus user-level friction for Cursor.
+  </Card>
+  <Card title="Layer 1 — npm" href="/guides/layer-1-npm">
+    `ignore-scripts=true` globally, lockfile discipline, release cooldowns, provenance checks.
+  </Card>
+  <Card title="Layer 2 — pip" href="/guides/layer-2-pip">
+    Refuse installs outside a virtualenv; prefer wheels and hash-pinned requirements.
+  </Card>
+  <Card title="Layer 3 — Homebrew" href="/guides/layer-3-homebrew">
+    Source trust, `.pkg` cask scrutiny, and a version-controlled Brewfile as an allowlist.
+  </Card>
+  <Card title="Layer 4 — Agent defaults" href="/guides/layer-4-agent-defaults-soft">
+    One `AGENTS.md` that nudges Claude Code, Codex and Cursor toward lockfile and MCP hygiene.
+  </Card>
+  <Card title="The ceiling" href="/guides/the-ceiling-isolate-what-you-don-t-trust">
+    Everything above runs as you. For anything genuinely sketchy: a throwaway container.
+  </Card>
+</Columns>
+
+## Who it is for
+
+macOS developers moving quickly with AI coding agents, on a machine that holds real
+credentials: SSH keys, cloud tokens, `.env` files, npm publish tokens. If you already install
+everything inside disposable VMs, most of this is redundant — go straight to
+[the ceiling](/guides/the-ceiling-isolate-what-you-don-t-trust).
+
+There is also a fleet path: [`onboard-agents.sh`](/reference/onboard-agents) applies the whole
+stack on a new machine and refuses to call it onboarded until behavioural checks pass. See
+[Fleet onboarding](/guides/fleet-onboarding).
+
+## What it explicitly does not do
+
+It is layered friction plus one hard block. It is **not** a force field. Every install still
+runs as your user, with your files and tokens in reach.
+
+- Malicious code you deliberately run outside these defaults.
+- Packages that execute through non-npm-script build paths (native build files, extension
+  hooks, compiler plugins, test hooks).
+- Browser/session-cookie theft, malicious editor extensions, shell profile tampering, or
+  secrets already loaded into environment variables.
+- Tool config drift. AI CLI and editor policy formats change; verify after installing and
+  after upgrading tools.
+
+The full treatment is in [What this is (and isn't)](/guides/what-this-is-and-isn-t).
+
+## Scope and constraints
+
+**macOS only** for the full stack. Tested against **Claude Code v2.1.x** — these settings
+drift, so check the [Claude Code docs](https://code.claude.com/docs/en/permission-modes) if a
+key does not behave as described.
+
+Partial platform support is real but narrower:
+
+| Platform | Applies | Does not apply |
+|---|---|---|
+| macOS | Scripted: 0a, 0b, 0e, 0f, 0h, 1–3. Manual: 0c (`chflags` lock ritual), 0g (Antigravity toggle) | — |
+| Linux | 0a (at `/etc/claude-code/managed-settings.json`), 0b, 0f, 1, 2 | 0h (`sandbox-exec`), Cursor 0c–0e, Homebrew. pi on Linux stays **unsandboxed**. |
+| Unraid | As Linux, but `/etc` is rebuilt at boot — re-apply root-owned files from `/boot/config/go` | As Linux. Agents run as **root**, which bypasses Layer 0f and makes any root-owned ceiling editable. |
+
+Licensed MIT. No warranty — this is a starting point, not a guarantee.
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Quickstart" href="/quickstart">
+    Shortest path from nothing to a verified baseline.
+  </Card>
+  <Card title="What this is (and isn't)" href="/guides/what-this-is-and-isn-t">
+    The honest limits, before you rely on any of it.
+  </Card>
+  <Card title="harden-deps.sh" href="/reference/harden-deps">
+    Every layer the script applies, and how to undo each one.
+  </Card>
+  <Card title="verify-install.sh" href="/reference/verify-install">
+    The read-only checker: what each PASS, WARN and FAIL means.
+  </Card>
+</Columns>

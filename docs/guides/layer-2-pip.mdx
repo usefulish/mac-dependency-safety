@@ -1,0 +1,70 @@
+---
+title: "Layer 2 — pip"
+description: "There is no ignore-scripts equivalent for pip. Two defaults that hold up: require a virtualenv, and prefer pre-built wheels for untrusted packages."
+---
+
+There's no clean `ignore-scripts` equivalent for pip: for source distributions the build *is*
+arbitrary code execution. `setup.py` runs at install time by design, so there is no flag that
+says "install this but don't run its code" the way there is for npm.
+
+Two defaults hold up anyway.
+
+## Refuse installs outside a virtualenv
+
+```bash
+python3 -m pip config set global.require-virtualenv true
+```
+
+This prevents accidental system/global installs. It does not stop malicious code in a package
+you install inside a venv — it stops that code from landing in your system Python, and it makes
+every install a deliberate act inside a scoped environment you can delete.
+
+Loosen: `python3 -m pip config unset global.require-virtualenv`
+
+<Note>
+This is deliberately chosen over a global `--only-binary :all:`, which would break editable
+installs of your own projects (`pip install -e .` builds from source). Keep `--only-binary` as
+a per-install habit instead.
+</Note>
+
+## For untrusted packages, prefer pre-built wheels
+
+A wheel is already built, so installing it skips the install-time code path entirely:
+
+```bash
+python3 -m pip install --only-binary :all: <pkg>
+```
+
+If the package has no wheel for your platform, this fails loudly rather than silently falling
+back to a source build — which is the point.
+
+## Pin real dependencies with hashes
+
+```bash
+pip install --require-hashes -r requirements.txt   # lockfile via pip-compile or uv
+```
+
+With `--require-hashes`, every requirement must carry a hash and pip refuses the install if
+anything resolves to different bytes. A package can't silently swap versions underneath you.
+Generate the file with `pip-compile` or `uv`.
+
+## If you publish Python packages
+
+Prefer PyPI Trusted Publishing and attestations over long-lived upload tokens. Treat
+attestations the same way as npm provenance: useful for origin and tamper review, not proof
+that the code is benign.
+
+## Never `sudo pip`
+
+`sudo pip install` hands a package's build code root on your machine and writes into the
+system Python that macOS and Homebrew manage. `require-virtualenv` already makes this awkward;
+the rule stands regardless.
+
+## Verify
+
+```bash
+python3 -m pip config get global.require-virtualenv   # expect: true
+```
+
+[`verify-install.sh`](/reference/verify-install) checks the same value, but reports anything
+other than `true` as a **WARN**, not a FAIL — unlike the npm check.

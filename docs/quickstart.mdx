@@ -1,0 +1,185 @@
+---
+title: "Quickstart"
+description: "Install the mac-dependency-safety baseline by hand or with the script, then prove it works with behavioural checks."
+---
+
+This is the shortest path from a clean Mac to a verified baseline. Every command below comes
+from the repository.
+
+<Warning>
+Read [`harden-deps.sh`](/reference/harden-deps) and the `managed-settings/` templates before
+running anything. The whole point of this repo is that you should not run scripts you have not
+read — including this one.
+</Warning>
+
+## Prerequisites
+
+- macOS (the full stack is macOS-only; see [Overview](/) for the Linux/Unraid subset).
+- `sudo` access — Layer 0 installs root-owned files under `/Library/Application Support`,
+  `/etc/codex`, `/etc/hermes` and `/etc/pi`.
+- A local checkout of the repo. Run everything **from the repo directory**; the templates are
+  referenced by relative path.
+- Whichever tools you want hardened, already installed: `npm`, `python3`, `brew`, `codex`,
+  `hermes`, `pi`, Cursor. Every layer is guarded behind a presence check — missing tools are
+  skipped, not failed.
+
+Run the scripts **as the user your agents run as**. Managed files are root-owned, but the
+user-owned halves (the pi extension, Cursor config) land in that user's `$HOME`.
+
+## Install
+
+<Tabs>
+  <Tab title="With the script">
+    <Steps>
+      <Step title="Read the script">
+        ```bash
+        less harden-deps.sh        # actually read it
+        ```
+      </Step>
+      <Step title="Run it">
+        ```bash
+        bash harden-deps.sh        # applies the scripted layers 0a, 0b, 0e, 0f, 0h (where the harness is installed)
+                                   # and 1-3; prompts for sudo once; exits 1 if any layer fails to install.
+                                   # 0c (chflags) and 0g (Antigravity) stay manual — see their sections.
+        ```
+
+        It guards each tool behind a presence check, will not clobber an existing `~/Brewfile`
+        or an existing `~/.cursor/mcp.json`, tags every loosenable line with `# LOOSEN:`, and
+        prints final state. Nothing in it is absent from the documentation.
+      </Step>
+      <Step title="Do the manual layers">
+        Layer 0c is a `chflags` lock ritual the script only *prints*; Layer 0g is a toggle in
+        Antigravity's own config that no script here sets; Layer 4 (`AGENTS.md`) is a
+        per-project or global copy. See
+        [Layer 0](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices) and
+        [Layer 4](/guides/layer-4-agent-defaults-soft).
+      </Step>
+      <Step title="Restart long-lived agent processes">
+        Layer 0h's pi extension is loaded once per process. Restart every interactive pi
+        session and the A2A host, plus any Hermes gateways.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="By hand">
+    <Steps>
+      <Step title="Layer 0a — Claude Code managed settings">
+        ```bash
+        sudo mkdir -p "/Library/Application Support/ClaudeCode"
+        sudo cp managed-settings/claude.json "/Library/Application Support/ClaudeCode/managed-settings.json"
+        sudo chown root:wheel "/Library/Application Support/ClaudeCode/managed-settings.json"
+        sudo chmod 644        "/Library/Application Support/ClaudeCode/managed-settings.json"
+        ```
+      </Step>
+      <Step title="Layer 0b — Codex managed requirements">
+        ```bash
+        sudo mkdir -p "/etc/codex"
+        sudo cp managed-settings/codex.toml "/etc/codex/requirements.toml"
+        sudo chown root:wheel "/etc/codex/requirements.toml"
+        sudo chmod 644        "/etc/codex/requirements.toml"
+        ```
+
+        The shipped template allowlists a `repo-git` permission profile. If you have not
+        defined that profile in `~/.codex/config.toml`, **Codex will refuse to start** —
+        remove the line or define the profile first. See
+        [Layer 0](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices).
+      </Step>
+      <Step title="Layer 1 — npm">
+        ```bash
+        npm config set ignore-scripts true
+        ```
+      </Step>
+      <Step title="Layer 2 — pip">
+        ```bash
+        python3 -m pip config set global.require-virtualenv true
+        ```
+      </Step>
+      <Step title="Layer 3 — Homebrew">
+        ```bash
+        brew bundle dump --file=~/Brewfile
+        ```
+      </Step>
+      <Step title="Optional harness layers">
+        Hermes (0f) and pi (0h) each have their own install sequence, and pi's root half must
+        go in before its extension. Both are in
+        [Layer 0](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices).
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Verify
+
+Run the read-only verifier. It installs nothing and changes nothing.
+
+```bash
+bash verify-install.sh
+```
+
+It checks that the expected safety settings are installed, confirms that Codex dangerous
+bypass requests are constrained, and points out anything still worth reviewing. It ends with
+a `PASS` / `WARN` / `FAIL` tally and exits 1 if any `FAIL` was printed.
+
+Treat warnings as a review queue, not automatic failure — some tools may simply not be
+installed on your machine. Full row-by-row meaning is in
+[`verify-install.sh`](/reference/verify-install).
+
+### Spot checks you can run yourself
+
+The verifier automates these, but running them by hand is the fastest way to convince
+yourself the layers actually bind:
+
+```bash
+npm config get ignore-scripts                         # expect: true
+python3 -m pip config get global.require-virtualenv   # expect: true
+```
+
+If Hermes is installed (`approvals test` evaluates the real guards and never executes the
+command; 0 allow, 2 ask, 3 deny):
+
+```bash
+hermes approvals test -- cat ~/.ssh/id_rsa   # expect exit 3
+hermes approvals test -- cat .env            # expect exit 3
+hermes approvals test -- cat prod.envelope   # expect exit 0  <- catches over-broad rules
+hermes doctor                                # names the resolved managed dir
+```
+
+If pi is installed:
+
+```bash
+/etc/pi/bash -c 'ls ~/.ssh'                    # expect: Operation not permitted
+/etc/pi/bash -c 'cat /etc/hosts'               # expect: success
+/etc/pi/bash -c 'npm config get ignore-scripts' # expect: same as outside (true)
+stat -f '%Su:%Sg %Lp' /etc/pi /etc/pi/*         # expect: root:wheel 755 (dir, bash) / 644 (sandbox.sb, ripgrep.conf)
+cmp ~/.pi/agent/extensions/dependency-safety.ts managed-settings/pi/dependency-safety.ts  # expect: silent
+bash verify-install.sh                          # Layer 0h section does all of the above
+```
+
+<Note>
+A `FAIL` for Cursor Layer 0c/0d (immutable flags, missing `permissions.json`) on a machine
+where Cursor is installed is the design: those are manual steps, and the FAIL is the reminder.
+The fleet treats Cursor as a temporary worker and downgrades those rows to WARN via
+`CURSOR_TEMP_WORKER=1`; run `CURSOR_TEMP_WORKER=0 bash verify-install.sh` to see them as
+failures again.
+</Note>
+
+## Undo
+
+Every layer is reversible. The two global package-manager settings:
+
+```bash
+npm config delete ignore-scripts
+python3 -m pip config unset global.require-virtualenv
+```
+
+For the managed files, remove the root-owned file the layer installed (for example
+`sudo rm "/Library/Application Support/ClaudeCode/managed-settings.json"`). Per-layer undo
+notes are in [`harden-deps.sh`](/reference/harden-deps).
+
+## Where to go next
+
+- [Layer 0](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices) — the only layer
+  with real enforcement, and its known gaps.
+- [Layer 1 — npm](/guides/layer-1-npm) — what `ignore-scripts=true` costs you and how to work
+  around it.
+- [Fleet onboarding](/guides/fleet-onboarding) — installing this across machines with an
+  acceptance gate.
