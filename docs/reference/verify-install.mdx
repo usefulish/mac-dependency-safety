@@ -1,0 +1,213 @@
+---
+title: "verify-install.sh"
+description: "The read-only checker for the mac-dependency-safety baseline — every row it prints, what it actually probes, and why some checks run the tool instead of grepping a file."
+---
+
+Checks whether the controls this repo documents are present and **effective** on the current
+machine. It does not install or change settings.
+
+```bash
+bash verify-install.sh
+```
+
+Where a control is behavioural (Codex `deny_read`, Hermes `approvals.deny`, the pi sandbox),
+the check runs the tool's own probe inside that tool's sandbox — a sandboxed read installs and
+changes nothing. The one execution outside a sandbox is `codex ... doctor`, which is read-only
+by design.
+
+<Note>
+Behavioural probes exist because grepping for a key proved structurally blind:
+`requirements.toml` accepted three inert bare `**/` globs for months and the old check reported
+PASS the whole time. The rule is verify by artifact, and always keep a control row — a deny
+that blocks *everything* is as broken as one that blocks nothing.
+</Note>
+
+## Invocation
+
+It takes **no arguments and no flags**. Run it from the repo directory: the Layer 0h extension
+check compares the installed file against `managed-settings/pi/dependency-safety.ts` relative
+to the script's own location.
+
+## Environment variables
+
+<ParamField path="CURSOR_TEMP_WORKER" type="0 | 1" default="0">
+  When `1`, the Cursor Layer 0c/0d gaps (missing `permissions.json`, unset immutable flags) are
+  reported as **WARN (ACCEPTED DEBT)** rather than FAIL — the fleet treats Cursor as a temporary
+  worker (decision `c983f950`). Set it to `0` when Cursor becomes a permanent host and the rows
+  revert to FAIL.
+
+  Any value other than `0` or `1` aborts with exit 2 and
+  `CURSOR_TEMP_WORKER must be 0 or 1, got: '<value>'`, so a typo cannot silently select a
+  verdict.
+</ParamField>
+
+<ParamField path="HERMES_MANAGED_DIR" type="path" default="/etc/hermes">
+  Honoured so the check follows the same resolution Hermes does. If it is set at all, the
+  script emits a WARN — a user-settable override defeats the whole layer.
+</ParamField>
+
+<ParamField path="HOME" type="path">
+  Every user-owned path it inspects is derived from it: `~/.cursor/*`, `~/.gemini/config/config.json`,
+  `~/.pi/agent/extensions/dependency-safety.ts`, `~/Brewfile`, and the probe fixtures.
+</ParamField>
+
+It also branches on `uname -s` for the Claude Code managed-settings path and for the Layer 0h
+verdicts.
+
+## Exit status
+
+| Exit | Meaning |
+|---|---|
+| 0 | No FAIL rows. WARNs may still be present. |
+| 1 | At least one FAIL row was printed. |
+| 2 | `CURSOR_TEMP_WORKER` was neither `0` nor `1`. |
+
+The run ends with a tally:
+
+```text
+== Result ==
+  PASS: <n>
+  WARN: <n>
+  FAIL: <n>
+```
+
+Treat warnings as a review queue, not automatic failure; some tools may simply not be installed
+on your machine.
+
+## What each section checks
+
+<AccordionGroup>
+  <Accordion title="Layer 0 — AI agent managed settings">
+    **Claude Code** (`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
+    `/etc/claude-code/managed-settings.json` on Linux): file exists and is valid JSON (via
+    `python3 -m json.tool`), and mentions `disableBypassPermissionsMode`. A missing file is a
+    WARN; a present-but-invalid file is a FAIL.
+
+    **Codex** (`/etc/codex/requirements.toml`): FAILs if the file is missing, or if it is
+    **writable by the current user** — a "managed" ceiling the agent's own user can rewrite is
+    not managed, and drift back to user ownership has been seen in the field. Then checks that
+    it mentions `allowed_permission_profiles`, `allowed_sandbox_modes`,
+    `allowed_approval_policies` and `deny_read`. A leftover `/etc/codex/codex.toml` is WARNed
+    about, since requirements load from `requirements.toml`.
+
+    **Codex bypass constraint:** runs
+    `codex --dangerously-bypass-approvals-and-sandbox doctor --summary` and FAILs if the output
+    still reports `unrestricted fs + enabled network · approval Never`.
+
+    **Codex deny_read, behaviourally:** creates a `~/.codex-probe.XXXXXX/.env` fixture at
+    runtime, then runs it through `codex sandbox --include-managed-config -P :workspace`. The
+    deny row must fail with the kernel's `Operation not permitted` (not merely a non-zero exit,
+    which `ENOENT` would also give) **and** the `/etc/hosts` control row must succeed. The two
+    rows together distinguish a working deny from a blanket lockdown. The fixture is removed
+    afterwards.
+
+    **Layer 1 canary:** compares `npm config get ignore-scripts` inside the Codex sandbox
+    against outside. Agreement is a PASS ("Layer 1 intact"); disagreement is a **WARN**
+    describing the accepted `~/.npmrc` gap. This row is the canary — if it ever flips to the
+    pass line, codex-cli changed something and the exemption decision should be re-evaluated.
+    See [Layer 0](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices).
+  </Accordion>
+
+  <Accordion title="Layer 0f — Hermes managed scope">
+    Checks `${HERMES_MANAGED_DIR:-/etc/hermes}/config.yaml` exists, is **not writable by the
+    current user**, and contains `deny:` rules.
+
+    Then the behavioural probe: `hermes approvals test -- cat ~/.ssh/id_rsa` must return verdict
+    3 (deny), and `hermes approvals test -- cat prod.envelope` must **not** — a rule set can
+    fail by being too broad as easily as too narrow. `approvals test` evaluates the real runtime
+    guards and never executes the command, prompts, or persists anything (0 allow, 2 ask,
+    3 deny).
+
+    A missing `hermes` binary is a WARN.
+  </Accordion>
+
+  <Accordion title="Layer 0e — Cursor MCP">
+    Verdicts depend on whether `/Applications/Cursor.app` exists: a missing layer on a machine
+    that does not run Cursor is a WARN (correctly absent); on one that does it is a FAIL — with
+    the `CURSOR_TEMP_WORKER=1` downgrade applied to the `permissions.json` row.
+
+    - `~/.cursor/permissions.json`: valid JSON, and `mcpAllowlist` must not contain `"*:*"`.
+    - `~/.cursor/mcp.json`: valid JSON, and must not reference `@latest`.
+    - `~/.cursor/hooks/deny-risky-mcp.sh`: must be executable **and** actually deny — the check
+      pipes `{"tool_name":"mcp","tool_input":"read .env","command":"","url":""}` into it and
+      requires a `"permission": "deny"` response.
+    - `~/.cursor/hooks.json`: valid JSON, and the `deny-risky-mcp.sh` entry under
+      `beforeMCPExecution` must have `failClosed: true` (WARN if not).
+  </Accordion>
+
+  <Accordion title="Layer 0g — Antigravity sandboxing">
+    Only evaluated when `/Applications/Antigravity.app` exists; otherwise a WARN ("not
+    applicable").
+
+    Checks `~/.gemini/config/config.json` is valid JSON and that
+    `userSettings.enableTerminalSandbox` is `true`.
+
+    This is an **artifact check only**. The toggle is user-owned, so it is defence in depth,
+    not a root-anchored layer like 0a/0b/0f — and behavioural enforcement would need the IDE
+    running, since the sandbox wraps commands the *agent* runs, not shell commands from this
+    script.
+  </Accordion>
+
+  <Accordion title="Layer 0h — pi sandbox">
+    **Ownership and modes first.** `/etc/pi` (755), `/etc/pi/bash` (755), `/etc/pi/sandbox.sb`
+    (644) and `/etc/pi/ripgrep.conf` (644) must each be owned by uid 0 with exactly that mode.
+    `-w` only reports the current user's effective access, so owner and mode bits are read
+    explicitly with `stat -f` (BSD; Layer 0h is macOS-only). A user-writable `/etc/pi` would let
+    the agent unlink the root-owned profile and drop an allow-all one in its place between two
+    bash calls.
+
+    **Then four behavioural probes through the real wrapper**, with runtime fixtures so nothing
+    reads a real secret:
+
+    | Probe | Expected |
+    |---|---|
+    | `ls ~/.ssh` | non-zero + `Operation not permitted` |
+    | `cat <tmp>/.env` | non-zero + `Operation not permitted` |
+    | `cat <tmp>/.envelope` | success (benign near-miss) |
+    | `cat /etc/hosts` | success (control) |
+
+    **Plus the Layer 1 interaction:** `npm config get ignore-scripts` must report the same value
+    inside the sandbox as outside. A `~/.npmrc` read-deny silently flips it to `false` and hands
+    install scripts back to the attacker, so this row is a **FAIL**, not a warning.
+
+    **Extension check:** `~/.pi/agent/extensions/dependency-safety.ts` must match this
+    checkout's `managed-settings/pi/dependency-safety.ts` **byte-for-byte** (`cmp`). A stale,
+    edited or replaced copy is a FAIL, not a warning. An extension installed without a complete
+    `/etc/pi` is reported as the fail-closed state it is: pi's bash and grep tools are disabled
+    until the root half lands.
+
+    On Linux, a machine with pi installed but no Layer 0h gets a WARN ("not applicable — pi runs
+    UNSANDBOXED here") rather than a FAIL.
+  </Accordion>
+
+  <Accordion title="Layer 0.5 — Immutable config files">
+    For each of `~/Library/Application Support/Cursor/User/settings.json`, `~/.cursor/mcp.json`
+    and `~/.cursor/permissions.json` that **exists**, checks for the `uchg` flag via
+    `ls -ldO`. Missing flags are FAIL when Cursor is installed, WARN otherwise — downgraded to
+    WARN (ACCEPTED DEBT) when `CURSOR_TEMP_WORKER=1`.
+
+    Files that do not exist are skipped silently by this section.
+  </Accordion>
+
+  <Accordion title="Layers 1–3">
+    - **npm:** `npm config get ignore-scripts` must be `true`. Anything else is a **FAIL**.
+      Missing `npm` is a WARN.
+    - **pip:** `python3 -m pip config get global.require-virtualenv` should be `true`. Anything
+      else is a **WARN**, not a FAIL.
+    - **Homebrew:** `~/Brewfile` should exist. Missing is a WARN.
+  </Accordion>
+</AccordionGroup>
+
+## What it changes
+
+Nothing that survives the run. The only writes are two temporary probe fixture directories —
+`$HOME/.codex-probe.XXXXXX` and a `mktemp -d` for the pi probes — each removed with `rm -rf`
+immediately after the probes complete.
+
+There is nothing to undo.
+
+## Using it as a gate
+
+[`onboard-agents.sh`](/reference/onboard-agents) runs this as its acceptance step and refuses to
+onboard a machine on any unaccepted FAIL row — or on any exit status the FAIL rows do not
+explain. See [Fleet onboarding](/guides/fleet-onboarding).

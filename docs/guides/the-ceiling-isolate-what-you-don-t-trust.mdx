@@ -1,0 +1,47 @@
+---
+title: "The ceiling: isolate what you don't trust"
+description: "Every layer in this repo runs as you. The only real containment is installing untrusted packages where there is nothing worth stealing."
+---
+
+Everything above runs as you. For anything genuinely sketchy, install it in a throwaway Docker
+container or scratch VM where there's nothing worth stealing.
+
+**When in doubt, container.**
+
+## Why this is the ceiling and not another layer
+
+The layers in this repo raise the cost of the easy attack. None of them change the fundamental
+shape of the problem:
+
+| Layer | Runs as | Can be undone by a payload running as you |
+|---|---|---|
+| [0a / 0b / 0f](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices) (root-owned files) | You, with a root-owned ceiling | No — but the ceiling only covers the paths and flags it names |
+| [0h](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices) (pi Seatbelt) | You, inside a kernel sandbox | The wall, no. The user-owned extension that points at it, yes |
+| [0c / 0d](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices) (Cursor) | You | Yes — `chflags nouchg` needs no root |
+| [1](/guides/layer-1-npm) / [2](/guides/layer-2-pip) / [3](/guides/layer-3-homebrew) | You | Yes — they are your own config files |
+| [4](/guides/layer-4-agent-defaults-soft) (`AGENTS.md`) | You | It is advice; malware never reads it |
+
+A container changes the shape: the install still executes arbitrary code, but it executes it
+somewhere your SSH keys, cloud tokens, `.env` files and npm publish credentials are not.
+
+## Where the baseline visibly stops
+
+Three concrete cases from the rest of this documentation where the layers cannot help and a
+container is the answer:
+
+- **Native build paths.** A package with `binding.gyp` / `node-gyp` gets install-time execution
+  without any `postinstall` entry, so `ignore-scripts=true` does not cover it. Treat an
+  unexpected native build in a new dependency as high-risk — read the tarball, pin a known-good
+  version, or install it in a throwaway container. See [Layer 1](/guides/layer-1-npm).
+- **pip source distributions.** For a sdist the build *is* arbitrary code execution; there is
+  no `ignore-scripts` equivalent. `--only-binary :all:` avoids it when a wheel exists, and a
+  container covers the rest. See [Layer 2](/guides/layer-2-pip).
+- **Homebrew casks shipping a `.pkg`.** Those run the macOS installer as root once you enter
+  your password. Nothing in this repo constrains that. See [Layer 3](/guides/layer-3-homebrew).
+
+## The honest framing
+
+Treat the settings in this repo as the everyday guard that catches careless mistakes, and a
+container as the seatbelt for installs you don't trust. Both, not either.
+
+More on the limits: [What this is (and isn't)](/guides/what-this-is-and-isn-t).

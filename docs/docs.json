@@ -1,0 +1,50 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "mac-dependency-safety",
+  "description": "Documentation for usefulish/mac-dependency-safety.",
+  "colors": {
+    "primary": "#0D9373",
+    "light": "#07C983",
+    "dark": "#0D9373"
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting Started",
+        "pages": [
+          "index",
+          "quickstart"
+        ]
+      },
+      {
+        "group": "Guides",
+        "pages": [
+          "guides/what-this-is-and-isn-t",
+          "guides/why-the-nx-hack",
+          "guides/layer-0-stop-ai-agents-being-turned-into-accomplices",
+          "guides/layer-1-npm",
+          "guides/layer-2-pip",
+          "guides/layer-3-homebrew",
+          "guides/layer-4-agent-defaults-soft",
+          "guides/the-ceiling-isolate-what-you-don-t-trust",
+          "guides/fleet-onboarding"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/harden-deps",
+          "reference/onboard-agents",
+          "reference/verify-install"
+        ]
+      },
+      {
+        "group": "About",
+        "pages": [
+          "about/changelog"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,104 @@
+---
+title: "What this is (and isn't)"
+description: "Layered friction plus one hard block — not a force field. The honest limits of the mac-dependency-safety baseline before you rely on it."
+---
+
+Read this before you rely on any layer in this repo. A reader who is misled by a security
+control is worse off than one who never installed it.
+
+## What it is
+
+Layered friction plus one hard block.
+
+The **hard block** is [Layer 0](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices):
+root-owned managed settings that a non-root process genuinely cannot edit. That is a real wall
+for Claude Code (`/Library/Application Support/ClaudeCode/managed-settings.json`), Codex
+(`/etc/codex/requirements.toml`), Hermes (`/etc/hermes/config.yaml`) and pi's Seatbelt half
+(`/etc/pi/`).
+
+Everything else is **friction**: it raises the cost of the easy attack and makes risky changes
+visible. Layer 0c's `chflags uchg` on Cursor settings is a speed bump its own owner can clear.
+Layer 4's `AGENTS.md` is advice an agent can ignore. Layers 1–3 are config a determined payload
+running as you can rewrite.
+
+## What it is not
+
+It is **not** a force field. Every install below still runs as your user, with your files and
+tokens in reach. The only thing that truly *contains* a bad package is installing it where
+there's nothing to steal — a throwaway container.
+
+Treat these settings as the everyday guard that catches careless mistakes, and a container as
+the seatbelt for installs you don't trust. See
+[The ceiling](/guides/the-ceiling-isolate-what-you-don-t-trust).
+
+## Things this does not protect against
+
+<AccordionGroup>
+  <Accordion title="Malicious code you deliberately run outside these defaults">
+    `npm install --ignore-scripts=false`, a manual `npm rebuild` of a package you have not
+    read, `curl | sh` — none of these are covered. The layers set defaults; they do not
+    override your own explicit decisions.
+  </Accordion>
+  <Accordion title="Packages that execute through non-npm-script build paths">
+    Native build files, extension hooks, compiler plugins and test hooks all get execution
+    without a `preinstall` or `postinstall` entry in `package.json`. A package with a
+    `binding.gyp` / `node-gyp` setup is the common case — especially when you have loosened
+    script blocking for a build-on-install dependency. See
+    [Layer 1 — npm](/guides/layer-1-npm).
+  </Accordion>
+  <Accordion title="Browser and session theft, editor extensions, shell profiles, live env vars">
+    Cookie and session-token theft from your browser, malicious editor extensions, tampering
+    with your shell profile, and secrets already loaded into environment variables are all
+    outside the model. The Layer 0 deny lists are path-based: a token already exported into
+    the environment of a process is not a path.
+  </Accordion>
+  <Accordion title="Tool config drift">
+    AI CLI and editor policy formats change. The repo has already had to re-root three
+    `deny_read` entries in the Codex template that silently matched nothing, and to switch
+    Codex from named permission profiles to top-level allowlists. Verify after installing
+    **and after upgrading tools** — that is what [`verify-install.sh`](/reference/verify-install)
+    is for, and why its checks are behavioural probes rather than greps for a key name.
+  </Accordion>
+</AccordionGroup>
+
+## Scope and version constraints
+
+**macOS only.** Tested against **Claude Code v2.1.x**. These settings drift, so check the
+[Claude Code docs](https://code.claude.com/docs/en/permission-modes) if a key doesn't behave as
+described.
+
+The Linux and Unraid subsets are documented in [Fleet onboarding](/guides/fleet-onboarding), but
+they are genuinely narrower — pi on Linux stays unsandboxed, and on Unraid agents run as root,
+which bypasses any root-owned ceiling entirely.
+
+## The drift countermeasure: a monthly review
+
+Because config drift is a real failure mode, the repo ships a GitHub Actions workflow that opens
+one issue on the first day of each month:
+
+```text
+.github/workflows/monthly-threat-review.yml
+```
+
+It does not scan the internet or edit files. It creates a checklist issue so a human can review
+current npm, PyPI, Homebrew, AI-agent and MCP risks, then make only the updates that still fit
+this repo's "sane baseline" scope. You can also run it manually from GitHub:
+**Actions → Monthly threat baseline review → Run workflow**.
+
+Two constraints if you fork this: GitHub only runs scheduled workflows from the default branch,
+and the repository must have Issues enabled. If your repo or organization restricts the default
+`GITHUB_TOKEN` to read-only, allow Actions to create issues in repository settings. To change
+the cadence, edit the `cron` line in that workflow — GitHub schedules use UTC.
+
+## Why the README is the deliverable
+
+This repo exists because package managers run arbitrary code as you at install time. Piping a
+stranger's setup script into your shell to defend against *that* is self-defeating.
+
+So every step in this documentation is a hand-runnable command.
+[`harden-deps.sh`](/reference/harden-deps) is a convenience that does exactly what is
+documented here and nothing more. It's short on purpose — read it, then decide.
+
+## Licence
+
+MIT. No warranty — this is a starting point, not a guarantee.

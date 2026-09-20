@@ -1,0 +1,135 @@
+---
+title: "Layer 1 — npm"
+description: "Disable npm lifecycle scripts globally, pin with lockfiles and npm ci, add a release cooldown, and understand what none of it covers."
+---
+
+One command stops the nx pattern:
+
+```bash
+npm config set ignore-scripts true
+```
+
+That writes `ignore-scripts=true` to `~/.npmrc` and applies to every npm install on the
+machine. A `preinstall` or `postinstall` hook in a freshly-published malicious package no
+longer runs.
+
+Loosen: `npm config delete ignore-scripts`
+
+## The tradeoff
+
+Packages that legitimately build on install must now be run by hand:
+
+```bash
+npx puppeteer browsers install chrome   # e.g. puppeteer's chromium download
+npm rebuild <pkg>                        # native modules (sharp, better-sqlite3)
+npx can-i-ignore-scripts                 # audit which deps actually need scripts
+```
+
+`can-i-ignore-scripts` is the useful first move on an existing project: it tells you which of
+your dependencies actually declare install scripts, so you know how much manual work the flag
+costs you before you hit it mid-build.
+
+## Watch for native build paths
+
+<Warning>
+Packages with native components (`binding.gyp` / `node-gyp`) can get install-time execution
+without an obvious `preinstall` or `postinstall` script in `package.json` — especially when
+script blocking is loosened for a build-on-install dependency.
+</Warning>
+
+Treat unexpected native builds in a new dependency as high-risk: read the tarball, prefer a
+known-good locked version, or install it in a throwaway container. This is why the
+[ceiling](/guides/the-ceiling-isolate-what-you-don-t-trust) is still "isolate what you don't
+trust", not "set one npm flag".
+
+## Cooldown on new versions
+
+Bad versions are usually pulled within hours or days — the nx packages were live about five
+hours. Installing the version as of a week ago skips that window entirely:
+
+```bash
+npm install <pkg> --before="$(date -v-7d +%Y-%m-%d)"   # version as of a week ago
+```
+
+(`date -v-7d` is the BSD/macOS spelling.) pnpm has a native `minimumReleaseAge` setting that
+does this automatically.
+
+Frozen installs for the other package managers:
+
+```bash
+pnpm install --frozen-lockfile   # same discipline as npm ci
+yarn install --immutable
+```
+
+## Commit the lockfile, install with `npm ci`
+
+`ci` treats `package-lock.json` as authoritative and fails on drift; `install` rewrites it
+silently. This pins you *between* updates so a freshly-published malicious version can't slip
+in on a routine install, and any change to the tree lands in a reviewable diff — the same idea
+as the Brewfile in [Layer 3](/guides/layer-3-homebrew), one layer down.
+
+```bash
+npm ci                # reproducible install from the lockfile — CI and local default
+npm install <pkg>     # only when deliberately adding or bumping a dep
+```
+
+Three cheap layers at different points in the chain:
+
+| Control | Guards |
+|---|---|
+| Lockfile + `npm ci` | The gap *between* updates |
+| `--before` cooldown | The *moment* you update |
+| `ignore-scripts=true` | A payload that already landed |
+
+Neither of the first two neuters a payload that is already in your tree — that is what
+`ignore-scripts` is for.
+
+[Layer 4](/guides/layer-4-agent-defaults-soft) exists to teach AI coding agents the same
+`npm ci` default, since an agent "refreshing deps" with a bare `npm install` silently mutates
+the lockfile.
+
+## Private and internal packages
+
+Use scoped names and explicit private registry routing. Dependency-confusion attacks publish
+public packages with names or inflated versions that beat an intended internal package. Do not
+rely on "this name only exists inside our company" as a control.
+
+## If you publish npm packages
+
+Remove long-lived publish tokens where you can: use npm Trusted Publishing/OIDC, require 2FA,
+consider staged publishing for CI releases, and keep any install-only token read-only.
+
+This does not protect you from installing a malicious dependency. It reduces the chance that
+your machine or CI runner becomes the next publisher in the chain.
+
+## Provenance is review signal, not a trust guarantee
+
+```bash
+npm audit signatures
+```
+
+Run it after `npm ci` when you want to verify registry signatures/provenance for the resolved
+tree. A valid attestation says where a package came from; it does not say the package is safe.
+
+## Known gap: Layer 1 does not hold inside a Codex sandbox
+
+`ignore-scripts=true` lives in `~/.npmrc`, and Codex's [Layer 0b](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices)
+managed `deny_read` includes that path. npm treats an unreadable user config as absent, so
+`npm config get ignore-scripts` reads `false` inside a Codex sandbox and `true` outside —
+measured 2026-08-30 on codex-cli 0.150.1. Any install an agent runs inside that sandbox runs
+lifecycle scripts again.
+
+The gap is accepted because the deny cannot be narrowed; the reasoning and the WARN canary that
+watches it are in [Layer 0](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices).
+
+pi's [Layer 0h](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices) sandbox
+deliberately leaves `~/.npmrc` readable for exactly this reason, and
+[`verify-install.sh`](/reference/verify-install) FAILs if that stops being true.
+
+## Verify
+
+```bash
+npm config get ignore-scripts   # expect: true
+```
+
+`verify-install.sh` checks the same thing and FAILs on anything other than `true`.

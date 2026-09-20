@@ -1,0 +1,124 @@
+---
+title: "Changelog"
+description: "Notable changes to mac-dependency-safety, grouped by theme — behaviour changes and anything that needs action from you first."
+---
+
+The repository has not cut a tagged release; everything below sits under **Unreleased** in
+[`CHANGELOG.md`](https://github.com/usefulish/mac-dependency-safety/blob/main/CHANGELOG.md).
+This page summarises the entries that change behaviour or require action. The full file has the
+complete detail, including the record IDs behind each decision.
+
+## Unreleased
+
+### Requires action
+
+<Warning>
+**`allowed_permission_profiles` can brick Codex.** The Codex template gained an
+`allowed_permission_profiles` map, and every profile it names must already be defined — including
+ones that live in user config — or Codex refuses to start with `refers to undefined profile`. The
+shipped template allowlists `repo-git`, the audited `.git` relaxation: **define that profile in
+`~/.codex/config.toml` first, or drop the entry.** Two more traps found the hard way: the key is a
+map of name to bool, not a list (a list fails with `invalid type: sequence, expected a map`), and
+appending a bare `key = value` to the end of the file silently nests it under
+`[permissions.filesystem]` where it is ignored — use a table header.
+See [Layer 0](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices).
+</Warning>
+
+- **Restart long-lived agent processes after installing Layer 0h.** The pi extension set is
+  loaded once per process — interactive sessions and the A2A host both need a restart.
+- **`managed-settings/gemini.json` was removed intentionally.** Gemini CLI has been retired by
+  Google, so the repo no longer ships a Gemini managed-settings template.
+
+### Behaviour changes
+
+- **Layer 0b / Layer 1 interaction measured and documented.** With the managed `deny_read` on
+  `~/.npmrc`, `npm config get ignore-scripts` reads `false` inside a Codex sandbox (`true`
+  outside) on codex-cli 0.150.1 — [Layer 1](/guides/layer-1-npm)'s guard is silently gone for
+  in-sandbox installs. The gap is **accepted** because the deny cannot be narrowed: `~/**/.npmrc`
+  matches `~/.npmrc` itself (zero-segment glob, probed live), no `allow_read` key exists, and
+  `-c` cannot weaken the managed list. `verify-install.sh` gained the inside-vs-outside
+  comparison as a **WARN canary** — the pass line firing means codex-cli changed and the decision
+  should be revisited. Also documented: standalone `-c permissions.filesystem.deny_read` is inert
+  without `--include-managed-config`, and the `~`-rooted globs do not cover `.npmrc` outside
+  `$HOME`.
+
+- **Three `deny_read` entries in the Codex template never matched anything.** `**/.env`,
+  `**/.env.*` and `**/.npmrc` are re-rooted as `~/**/.env`, `~/**/.env.*` and `~/**/.npmrc`.
+  Codex requires filesystem paths to be absolute, `~/`-rooted or `:`-prefixed; the
+  permission-profile parser rejects the bare form outright, but `requirements.toml` accepted it
+  silently — so a quarter of the deny list was inert while `verify-install.sh` reported PASS.
+  Verified on codex-cli 0.147.0, macOS 15.3.
+
+- **`harden-deps.sh` now exits 1 on a failed layer.** It used to return the status of its final
+  `printf`, so a `sudo cp` error vanished. Related fixes: a backup that cannot be written now
+  refuses the replacement; all three `/etc/pi` files are backed up before overwrite; the Cursor
+  sections are skipped on Linux; an existing customized deny hook is backed up.
+
+- **The Cursor MCP deny hook missed secret paths embedded in command strings.** The
+  `.env`/`.ssh`/`.aws` patterns only matched at line boundaries of the final JSON field (no
+  `re.MULTILINE`) and did not accept whitespace as a path boundary, so payloads like `read .env`
+  or `cat ~/.env secrets` were allowed. The hook template also became fail-closed, and
+  verification now flags fail-open hook configuration.
+
+### New layers
+
+- **Layer 0h — a sandbox for the [pi](https://github.com/earendil-works/pi-mono) coding agent.**
+  pi was the one fleet harness with no read guard at all. Two halves: a root-owned `/etc/pi`
+  (Seatbelt profile, `bash` wrapper, `ripgrep.conf`) the kernel enforces, and a user-owned pi
+  extension that routes the built-in `bash` tool through the wrapper (fail-closed), overrides
+  the in-process `read` tool, blocks `write`/`edit` into credential directories, and guards
+  `grep`/`find`/`ls`.
+
+  Unlike Layer 0f this is a read-**path** guard, not a command-text matcher: the kernel resolves
+  the path, so traversal, symlinks and quoting tricks fail identically with EPERM, and every
+  child process inherits the profile. **`~/.npmrc` is exempted from the bash sandbox on
+  purpose** — denying it makes npm inside the sandbox silently report `ignore-scripts=false`.
+  Known limits are stated rather than implied, including a **pre-existing hard link** to a
+  credential file at an allowed path, which still reads: both Seatbelt and the guard decide by
+  path.
+
+- **Layer 0f — a Hermes managed-scope template.** Hermes was the one agent harness in the
+  baseline with no managed settings at all. The load-bearing key is `approvals.deny`, the only
+  unconditional lever Hermes exposes — matching terminal commands are blocked before `--yolo`,
+  `/yolo` and `approvals.mode: off` are consulted. Verified against a deliberately hostile user
+  config (`mode: off`, `deny: []`): 8/8 malicious probes blocked, 6/6 benign untouched. It is a
+  command-text matcher, not a path guard — traversal defeats it, and anyone who can set
+  `HERMES_MANAGED_DIR` bypasses the layer.
+
+- **`onboard-agents.sh`** — the fleet onboarding step that sandboxes a machine's agents by
+  default and proves it. It runs `harden-deps.sh`, installs the knowfleet-gate into every Hermes
+  profile except `librarian`, then runs `verify-install.sh` as an acceptance gate that exits 1 on
+  any FAIL not explicitly accepted with `--allow-fail`. `--check` is the verify-only mode. See
+  [Fleet onboarding](/guides/fleet-onboarding).
+
+### Verification
+
+- **`harden-deps.sh` installs Layers 0f and 0h**, skips each when the harness is absent, backs up
+  a differing existing managed file before replacing it, and uses the Linux Claude Code path
+  (`/etc/claude-code/managed-settings.json`) plus `root:0` ownership so one script serves both
+  OSes.
+
+- **`verify-install.sh` gained behavioural probes** rather than greps. Layer 0f runs
+  `hermes approvals test` — the first behavioural probe in the script — and asserts both
+  directions, because a rule set can fail by being too broad as easily as too narrow. Layer 0h
+  adds root-ownership and mode checks on `/etc/pi` and its three files, EPERM probes through the
+  real wrapper, a byte-for-byte comparison of the installed extension against the checkout's
+  template, and the npm inside-vs-outside agreement check. The Codex probe now uses a runtime
+  `~/.codex-probe.*/.env` fixture with an `/etc/hosts` control and requires the kernel's
+  "Operation not permitted", so a missing `~/.ssh/<key>.pub` can no longer pass as a denial.
+  Layer 0h reports as a WARN (not applicable) rather than a FAIL on Linux.
+
+- **`onboard-agents.sh` refuses any verifier exit status its FAIL rows do not explain** — a crash
+  or missing verifier is not a pass — prints every accepted FAIL line, and strips ANSI colour
+  with a bash-injected ESC byte so BSD and GNU `sed` behave alike.
+
+### Documentation and guidance
+
+- Native npm build-path risk (`binding.gyp` / `node-gyp`), dependency-confusion basics, package
+  publisher token hygiene, provenance limits, and fake Homebrew installer risk are now documented.
+  See [Layer 1](/guides/layer-1-npm) and [Layer 3](/guides/layer-3-homebrew).
+- [Layer 4](/guides/layer-4-agent-defaults-soft)'s agent defaults were extended to avoid
+  unexpected native npm rebuilds and registry/publish-token changes without explicit user intent.
+- A monthly GitHub Actions reminder opens a pragmatic threat-baseline review issue.
+- The repo is documented as a pragmatic hardening baseline, **not containment**, with the
+  non-goals stated explicitly. See [What this is (and isn't)](/guides/what-this-is-and-isn-t).

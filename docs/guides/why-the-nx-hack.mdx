@@ -1,0 +1,60 @@
+---
+title: "Why (the nx hack)"
+description: "The August 2025 nx npm compromise weaponized local AI CLIs from a postinstall hook. This repo is the set of defaults that would have blunted it."
+---
+
+Every layer in this repo traces back to one incident.
+
+## What happened
+
+In August 2025, compromised `nx` npm packages shipped a `postinstall` hook that harvested SSH
+keys, `.env` files, and GitHub/npm tokens — and, novelly, invoked locally installed AI CLIs to
+do the filesystem recon for it:
+
+```text
+claude --dangerously-skip-permissions
+gemini --yolo
+q --trust-all-tools
+```
+
+The packages were live for roughly five hours before removal.
+
+## Why it worked
+
+Three properties of a normal developer machine lined up:
+
+1. **npm lifecycle scripts run arbitrary code as you, at install time.** Nothing about
+   `npm install` asks whether you want a `postinstall` hook to run; it just runs, with your
+   uid, your filesystem and your tokens.
+2. **AI CLIs shipped bypass flags that any process running as you could invoke.** The agent
+   itself was a better recon tool than hand-written shell: it knows how to find things, and it
+   was one flag away from doing so without prompting.
+3. **The secrets were sitting at well-known paths.** `~/.ssh`, `~/.aws`, `~/.npmrc`,
+   `~/.config/gh`, and `.env` files in every project.
+
+## What each layer answers
+
+| Property exploited | Layer that answers it |
+|---|---|
+| Lifecycle scripts run at install time | [Layer 1](/guides/layer-1-npm): `npm config set ignore-scripts true` — this alone stops the nx pattern |
+| Agent bypass flags are user-overridable | [Layer 0](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices): root-owned managed settings that disable bypass mode and cannot be edited by a non-root process |
+| Secrets sit at well-known paths | Layer 0 again: `deny_read` / `Read(...)` deny lists and the pi Seatbelt profile covering `~/.ssh`, `~/.aws`, `~/.npmrc`, `~/.netrc`, `~/.git-credentials`, `~/.docker/config.json`, `~/.kube/config`, `~/.config/gcloud`, `~/.config/gh`, and `.env` files |
+| A freshly-published bad version slips into a routine install | [Layer 1](/guides/layer-1-npm): commit the lockfile, install with `npm ci`, and use a release cooldown (`--before`) when you do update |
+
+The last row matters because bad versions are usually pulled within hours or days. `nx` was
+live for about five hours. A one-week cooldown window would have skipped it entirely:
+
+```bash
+npm install <pkg> --before="$(date -v-7d +%Y-%m-%d)"   # version as of a week ago
+```
+
+## What it does not prove
+
+The nx hook used npm lifecycle scripts, so `ignore-scripts=true` neutralises that specific
+pattern. It does not neutralise the general one. A package with native build steps
+(`binding.gyp` / `node-gyp`) gets install-time execution without a `postinstall` entry, and the
+Layer 0 deny lists only cover the paths they name.
+
+That is why the ceiling in this repo is still
+[isolate what you don't trust](/guides/the-ceiling-isolate-what-you-don-t-trust), not "set one
+npm flag".

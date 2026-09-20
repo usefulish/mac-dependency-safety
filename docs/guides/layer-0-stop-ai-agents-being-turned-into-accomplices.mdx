@@ -1,0 +1,486 @@
+---
+title: "Layer 0 — Stop AI Agents being turned into accomplices"
+description: "Root-owned managed settings for Claude Code, Codex, Hermes and pi that no user or project config can override — plus the Cursor layers that are only friction."
+---
+
+Layer 0 is the only part of this repo with real enforcement. It installs system-level managed
+settings that **no user or project config can override**, blocking bypass modes (flags like
+`--yolo` or `--dangerously-skip-permissions`) and denying agents permission to read common
+secret files.
+
+Not every sub-layer has that standing. The table is the map:
+
+| Sub-layer | Tool | Enforcement | Anchored by |
+|---|---|---|---|
+| 0a | Claude Code | Wall | Root-owned `/Library/Application Support/ClaudeCode/managed-settings.json` |
+| 0b | Codex | Wall | Root-owned `/etc/codex/requirements.toml` |
+| 0f | Hermes | Guardrail (command-text matching only) | Root-owned `/etc/hermes/config.yaml` |
+| 0h | pi | Wall (kernel) + user-owned pointer | Root-owned `/etc/pi/` + `~/.pi/agent/extensions/dependency-safety.ts` |
+| 0c | Cursor settings | Speed bump | `chflags uchg`, clearable by its owner |
+| 0d / 0e | Cursor MCP | Friction | User-owned JSON + optional deny hook |
+| 0g | Antigravity | User-owned toggle | `~/.gemini/config/config.json` |
+
+<Note>
+The numbering is inconsistent between the README and the scripts: the README documents the
+Cursor MCP work as **0d**, while `harden-deps.sh` and `verify-install.sh` print the same block
+as **Layer 0e**. Both names refer to `~/.cursor/permissions.json`, `~/.cursor/mcp.json` and the
+deny hook.
+</Note>
+
+## 0a. Claude Code
+
+File: `/Library/Application Support/ClaudeCode/managed-settings.json`
+(template: `managed-settings/claude.json`)
+
+```bash
+sudo mkdir -p "/Library/Application Support/ClaudeCode"
+sudo cp managed-settings/claude.json "/Library/Application Support/ClaudeCode/managed-settings.json"
+sudo chown root:wheel "/Library/Application Support/ClaudeCode/managed-settings.json"
+sudo chmod 644        "/Library/Application Support/ClaudeCode/managed-settings.json"
+```
+
+The template sets `permissions.disableBypassPermissionsMode` to `"disable"` and a `deny` list
+of `Read(...)` rules covering `.env` files (project-local and under `$HOME`), `~/.ssh`,
+`~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `.npmrc` (all three spellings), `~/.netrc`,
+`~/.git-credentials`, `~/.docker/config.json` and `~/.kube/config`.
+
+Verify with `/status` inside Claude Code.
+
+<Note>
+On Linux the managed-settings path is `/etc/claude-code/managed-settings.json`;
+`harden-deps.sh` and `verify-install.sh` both pick the OS-appropriate location automatically.
+</Note>
+
+## 0b. Codex
+
+File: `/etc/codex/requirements.toml`
+(template: `managed-settings/codex.toml`)
+
+```bash
+sudo mkdir -p "/etc/codex"
+sudo cp managed-settings/codex.toml "/etc/codex/requirements.toml"
+sudo chown root:wheel "/etc/codex/requirements.toml"
+sudo chmod 644        "/etc/codex/requirements.toml"
+```
+
+The template constrains three axes — `allowed_sandbox_modes`, `allowed_approval_policies` and
+`allowed_permission_profiles` — plus a `[permissions.filesystem]` `deny_read` list.
+
+<Warning>
+The shipped template allowlists `"repo-git" = true`, the audited `.git` relaxation. **Every
+name in `allowed_permission_profiles` must already exist in user config**, so if you have not
+defined `repo-git` in `~/.codex/config.toml`, Codex refuses to start. Drop that entry or define
+the profile first.
+</Warning>
+
+### Adding or removing a permission profile — ALWAYS two files, in order
+
+Codex's permission-profile system spans a root-owned ceiling and a user-owned definition.
+Editing one side alone either does nothing or bricks Codex.
+
+<Steps>
+  <Step title="Define the profile in ~/.codex/config.toml">
+    User-writable, mode 600.
+
+    ```toml
+    [permissions.<name>]
+    extends = ":workspace"
+    [permissions.<name>.filesystem]
+    "<path>" = "write"   # or "read"/"deny"
+    ```
+  </Step>
+  <Step title="Allowlist it in /etc/codex/requirements.toml">
+    Root-owned, needs sudo. A top-level table, and a **MAP of name to boolean**, not a list.
+
+    ```toml
+    [allowed_permission_profiles]
+    ":read-only"           = true
+    ":workspace"           = true
+    "<name>"               = true
+    ":danger-full-access"  = false
+    ```
+  </Step>
+</Steps>
+
+Hard constraints, both probed:
+
+- **Every name listed in requirements.toml must already exist in user config.** A name listed
+  but undefined makes Codex refuse to start:
+  `requirements.toml allowed_permission_profiles refers to undefined profile '<name>'`. So
+  step 1 before step 2, always.
+- **Removing a profile is the same trap in reverse.** Delete the user-config definition first
+  and the requirements line second. Removing the definition while the allowlist still names it
+  bricks Codex the same way.
+- **Placement matters.** Appending `allowed_permission_profiles = ...` to the end of
+  requirements.toml silently nests it under the last table header where it is an unknown key,
+  ignored with no diagnostic. Write it as a top-level `[allowed_permission_profiles]` table,
+  above the first table header.
+- `default_permissions` in requirements is not required once the allowlist includes both
+  `:workspace` and `:read-only`.
+
+### Known gap: Layer 1 does not hold inside the Codex sandbox
+
+The managed `deny_read` includes `~/.npmrc`, so npm treats the user config as absent and
+`npm config get ignore-scripts` reads `false` inside a Codex sandbox (`true` outside) —
+measured 2026-08-30 on codex-cli 0.150.1. **Layer 1's guard is silently gone for in-sandbox
+installs.**
+
+This is accepted, not an oversight: the deny cannot be narrowed.
+
+- `~/**/.npmrc` matches `~/.npmrc` itself (a zero-segment glob — `~/**/.env` was probed denying
+  `~/.env`), so removing the explicit `~/.npmrc` entry changes nothing.
+- No `allow_read` override key exists.
+- A `-c` override cannot weaken the managed list.
+
+Exempting the home file would also exempt every project `.npmrc` under `~`.
+[`verify-install.sh`](/reference/verify-install) reports the inside/outside disagreement as a
+WARN canary — if it ever reports agreement, codex-cli changed behaviour and the exemption
+decision should be revisited.
+
+Two more measured edges:
+
+- `-c permissions.filesystem.deny_read=[...]` is **inert** unless `--include-managed-config` is
+  also passed. A standalone `-c` deny list binds nothing.
+- The `~`-rooted globs do not cover `.npmrc` outside `$HOME` (for example a checkout under
+  `/tmp`). pi's Layer 0h regex does.
+
+## 0f. Hermes managed scope
+
+File: `/etc/hermes/config.yaml`
+(template: `managed-settings/hermes.yaml`)
+
+```bash
+sudo mkdir -p "/etc/hermes"
+sudo cp managed-settings/hermes.yaml "/etc/hermes/config.yaml"
+sudo chown root:wheel "/etc/hermes/config.yaml"
+sudo chmod 755        "/etc/hermes"
+sudo chmod 644        "/etc/hermes/config.yaml"
+```
+
+Hermes' managed scope pins specific config keys above `~/.hermes/config.yaml`,
+`~/.hermes/.env` **and** the shell environment, enforced purely by the file's root ownership.
+Merging is leaf-level, so a managed list *replaces* the user's value for that key rather than
+appending — fold any per-machine deny rules into the template.
+
+The load-bearing key is `approvals.deny`: matching terminal commands are blocked *before*
+`--yolo`, `/yolo` and `approvals.mode: off` are consulted. Verified with a user config of
+`mode: off` + `deny: []` still denying. The template also pins `approvals.mode: smart`,
+`approvals.cron_mode: deny` (headless cron with no human present fails closed) and
+`security.redact_secrets: true`.
+
+### Know what this is not
+
+Hermes has no path-based read guard — no equivalent of Claude Code's `Read(...)` deny or
+Codex's `deny_read`. These rules match command text seen by the `terminal` tool only, so:
+
+- Hermes' own file-read tool is **not** covered by anything here.
+- Path traversal defeats it — `cat ~/.config/../.ssh/id_rsa` is allowed.
+- An agent running as root, or anyone who can set `HERMES_MANAGED_DIR`, bypasses the layer
+  entirely. Fix that variable in the service unit if you depend on it.
+
+It is a guardrail against an honest-but-wrong agent, which is the threat model Hermes itself
+states for deny rules — not a sandbox against a hostile one.
+
+### Verify behaviourally
+
+Do not trust the file's presence. `approvals test` evaluates the real guards and never executes
+the command (0 allow, 2 ask, 3 deny):
+
+```bash
+hermes approvals test -- cat ~/.ssh/id_rsa   # expect exit 3
+hermes approvals test -- cat .env            # expect exit 3
+hermes approvals test -- cat prod.envelope   # expect exit 0  <- catches over-broad rules
+hermes doctor                                # names the resolved managed dir
+```
+
+The third probe matters as much as the first two: a rule set can fail by being too broad as
+easily as too narrow. The template's `.env` rules use a character class
+(`*.env[!a-z0-9_-]*`) rather than a bare `*.env*` precisely so `prod.envelope` and
+`my-environment.md` stay allowed.
+
+Hermes already blocks *writes* to credential paths (`~/.ssh`, `.env` anywhere, its own
+`auth.json`) natively for `write_file`/`patch` — but not for `terminal`. Layer 0f covers the
+read/exfil side of the same paths, as far as command-text matching can.
+
+## 0h. pi sandbox
+
+Files: `/etc/pi/sandbox.sb`, `/etc/pi/bash`, `/etc/pi/ripgrep.conf` (root-owned) and
+`~/.pi/agent/extensions/dependency-safety.ts` (user-owned)
+(templates: `managed-settings/pi/`)
+
+[pi](https://github.com/earendil-works/pi-mono) ships **no sandbox and no managed settings** —
+its docs say so, and point at containers. Its `bash` tool runs `bash -c <command>` as you,
+`read` opens any file, and an A2A-dispatched worker gets the same tools. This layer bolts a
+kernel-enforced read guard onto the tools pi already has, in two halves that are only useful
+together.
+
+### Root half — the wall
+
+A Seatbelt profile (the same `sandbox-exec` mechanism Codex and Antigravity use on macOS)
+denies reads of credential paths, and a wrapper runs every agent command under it. Because the
+kernel resolves the path, `cat ~/.config/../.ssh/id_rsa`, symlinks and `$(printf …)` tricks all
+fail the same way: `Operation not permitted`. Child processes inherit it.
+
+```bash
+sudo mkdir -p /etc/pi
+sudo cp managed-settings/pi/sandbox.sb   /etc/pi/sandbox.sb
+sudo cp managed-settings/pi/bash         /etc/pi/bash
+sudo cp managed-settings/pi/ripgrep.conf /etc/pi/ripgrep.conf
+sudo chown -R root:wheel /etc/pi
+sudo chmod 755 /etc/pi /etc/pi/bash
+sudo chmod 644 /etc/pi/sandbox.sb /etc/pi/ripgrep.conf
+```
+
+The wrapper is itself fail-closed: if `/etc/pi/sandbox.sb` is missing or unreadable it exits
+126 without running the command, and it refuses to run at all if `HOME` is unset (the profile
+derives every credential path from it).
+
+### User half — the pointer
+
+A pi extension overrides the built-in `bash` tool to use the wrapper (fail-closed: no wrapper,
+no bash), overrides the in-process `read` tool with the same deny set, blocks `write`/`edit`
+into credential directories and into its own directory, refuses `grep`/`find`/`ls` aimed into a
+credential directory, and gives the `grep` tool's ripgrep the root-owned config so a content
+sweep skips secret files.
+
+```bash
+mkdir -p ~/.pi/agent/extensions
+cp managed-settings/pi/dependency-safety.ts ~/.pi/agent/extensions/
+# Then RESTART every long-lived pi process (interactive sessions, the A2A
+# host): the extension set is loaded once per process.
+```
+
+<Warning>
+Install the root half **first**. The extension fails closed, so installing it alone disables
+pi's bash tool until `/etc/pi` exists. `harden-deps.sh` enforces this ordering and skips the
+extension if the root half failed.
+</Warning>
+
+### Know what this is not
+
+- **The wall is root-owned; the pointer is not.** Anyone who can write `~/.pi/agent` can delete
+  the extension, and `pi --no-extensions` (`-ne`) starts a session without it. That is the
+  standing of a user-owned toggle (like Antigravity's terminal-sandbox switch, checked as Layer
+  0g in `verify-install.sh`), weaker than 0a/0b/0f where the agent consults the root-owned file
+  directly. pi has no managed-config path to fix that today. `verify-install.sh` therefore
+  checks the installed extension byte-for-byte against the template and root ownership plus
+  modes of `/etc/pi` and its three files — a user-writable directory would let the agent swap
+  the profile for an allow-all one between two bash calls.
+- **Known hole: pre-existing hard links.** Seatbelt and the guard both decide by path. A hard
+  link to `~/.ssh/id_rsa` that already sits at an allowed path reads normally (verified
+  2026-08-30). Creating one from inside the sandbox is denied, pi's tools cannot create one, and
+  it needs the same filesystem — so it takes prior local access. Symlinks are caught: the kernel
+  resolves them before the deny applies, and the guard checks both the path as written and its
+  resolved target (through the deepest existing parent, so a new file under a symlinked
+  directory is judged by where it would really land).
+- **`grep` gets two extra rules** because ripgrep's own precedence undoes a config file: an
+  explicit file operand runs in single-file mode where `--glob` exclusions do not apply, and the
+  tool's `glob` argument comes after the config so `**` re-includes everything. The hook applies
+  the read deny set to grep targets and rejects globs that would match a secret name; it also
+  blocks `grep` outright when `/etc/pi/ripgrep.conf` is missing. Note pi's standard tool set is
+  `read, bash, edit, write` — `grep`/`find`/`ls` are guarded when enabled (`--tools` or
+  `defaultTools`), not on by default.
+- The `read`/`write`/`grep` guards are in-process path checks, not a sandbox. Another extension
+  or an MCP server in the same pi process has the process's full permissions.
+- **`~/.npmrc` is deliberately readable inside the sandbox.** Layer 1's `ignore-scripts=true`
+  lives there; with it denied, npm inside the sandbox silently reports `ignore-scripts=false`
+  and runs install scripts again (verified 2026-08-30). Project-local `.npmrc` files are still
+  denied, and pi's `read` tool denies `~/.npmrc` regardless. Codex's Layer 0b denies `~/.npmrc`
+  sandbox-wide, so **Layer 1 does NOT hold inside a Codex sandbox** — see the Codex gap above.
+- **Parity costs, same as Codex:** `gh` inside pi's bash loses its auth (`~/.config/gh` is
+  denied), and `.env.example` is unreadable because 0a/0b deny `.env.*` and this layer matches
+  them. Run `gh` from your own shell.
+- `sandbox-exec` is deprecated by Apple. It still works on macOS 26.3.1; the verify probe below
+  is what tells you when it stops.
+
+### Verify behaviourally
+
+Both directions, plus the Layer 1 interaction:
+
+```bash
+/etc/pi/bash -c 'ls ~/.ssh'                    # expect: Operation not permitted
+/etc/pi/bash -c 'cat /etc/hosts'               # expect: success
+/etc/pi/bash -c 'npm config get ignore-scripts' # expect: same as outside (true)
+stat -f '%Su:%Sg %Lp' /etc/pi /etc/pi/*         # expect: root:wheel 755 (dir, bash) / 644 (sandbox.sb, ripgrep.conf)
+cmp ~/.pi/agent/extensions/dependency-safety.ts managed-settings/pi/dependency-safety.ts  # expect: silent
+bash verify-install.sh                          # Layer 0h section does all of the above
+```
+
+<Accordion title="Live receipt (2026-08-30, pi 0.84.4, macOS 26.3.1)">
+In a `pi -p` session with the extension loaded and glm-5.3 via agentrouter:
+`bash: cat ~/.ssh/<file>` returned `Operation not permitted`; `read` on a fixture `.env` and on
+a non-existent `~/.ssh/…` path returned the guard's denial while `.envelope` read normally;
+`write ~/.ssh/zzz_probe` was blocked and the file did not appear; `write` to a scratch file
+succeeded.
+
+Review-driven re-run the same day (`--tools read,grep,ls,bash`): `@`-prefixed and `file://`
+paths were judged like plain ones; a `.env.link` symlink to a benign file was denied by name; a
+`write` under a symlink to `~/.ssh` was blocked with no artifact; `grep` on an explicit `.env`,
+`grep` with `glob **`, and `ls` through the symlink were all denied while `grep` with
+`glob *.txt` and a path-less `grep` ran with `.env` excluded. A2A child sessions load the same
+global extension set but were not exercised (the host needs a restart first).
+</Accordion>
+
+## 0c. Cursor settings (a speed bump, not a wall)
+
+<Note>
+**Temp-worker note (2026-08-30, decision `c983f950`):** on this fleet Cursor is a temporary
+worker, not a durable host, so its Layer 0c/0d gaps are **accepted debt** —
+`verify-install.sh` reports the immutable-flag gaps as WARN (ACCEPTED-DEBT) via
+`CURSOR_TEMP_WORKER=1`; run `CURSOR_TEMP_WORKER=0 bash verify-install.sh` when Cursor becomes
+permanent.
+</Note>
+
+Cursor stores its settings in user-writable JSON files. A malicious `postinstall` script can
+`sed` these to enable bypass modes. Setting your safety defaults and then making the file
+**immutable** raises the bar — but be honest about how high.
+
+```bash
+# Lock Cursor settings (see Lock ritual in 0d for the full file list)
+chflags uchg "$HOME/Library/Application Support/Cursor/User/settings.json"
+```
+
+`chflags uchg` is the **user** immutable flag: its owner can clear it without root
+(`chflags nouchg <file>`), so a targeted payload running as you can unset it, edit, and re-set
+it. This stops unsophisticated scripts that blindly `sed`, not a determined attacker. Contrast
+with 0a/0b above, whose root-owned files a non-root process genuinely cannot touch — those are
+the real walls; this is a speed bump. You must also run `chflags nouchg <file>` to unlock
+before making legitimate changes.
+
+<Accordion title="Why there is no root-owned anchor (investigated 2026-08-15)">
+Cursor 3.15.6 has **no admin-managed path-permission layer**, and what exists is not usable as
+one:
+
+- `~/.cursor/sandbox-policies/` looks like a config surface but is Cursor's **internal scratch
+  transport**: files are written mode 0600 with a `sandbox-policy-*` prefix and
+  **garbage-collected after 1 hour** by mtime (`packages/shell-exec/src/sandbox/policy-file.ts`,
+  env override `CURSOR_SANDBOX_POLICY_DIR`). A file you place there is either ignored (wrong
+  prefix) or deleted (right prefix, old). It is also user-owned (mode 700), which gives it no
+  more standing than `chflags` anyway. Do not build a layer on it.
+- The app **ships** an MDM-format profile,
+  `app/policies/com.todesktop.230313mzl4w4u92.mobileconfig` (keys: `UpdateMode`,
+  `SignInEnforcement`, `WorkspaceTrustEnabled`, `AllowedExtensions`, `AllowedLoginDomains`),
+  which WOULD be a root-anchored layer if deployed via macOS profile installation — but it
+  currently contains **no path-permission keys**, and the fleet has no profile-install
+  infrastructure. Worth revisiting if Cursor extends that payload; until then Layer 0c stays a
+  speed bump and this page says so.
+</Accordion>
+
+## 0d. Cursor MCP (friction without enterprise MDM)
+
+MCP servers are install-time-equivalent risk: each one is a long-lived process that can read
+files, call APIs, and run shell commands as you. Unlike Claude Code, Cursor has no macOS
+**managed** MCP policy for personal accounts — so the playbook is: **keep default approvals**,
+**allowlist only boring tools for auto-run**, **pin server packages**, and **lock the config
+files** malware would edit.
+
+### Defaults (do this in Cursor Settings first)
+
+1. **Settings → Agents → Auto-run:** use **Ask every time** or **Allowlist (sandboxed)** — not
+   **Run everything**.
+2. **Settings → Tools & MCP:** disable servers you do not use (toggle off, do not delete — easy
+   to turn back on).
+
+### 0d-1. MCP auto-run allowlist (small on purpose)
+
+File: `~/.cursor/permissions.json`
+(template: `managed-settings/cursor-permissions.json`)
+
+The `mcpAllowlist` array uses `server:tool` entries (`context7:*`, `myserver:search`, etc.).
+**Never add `*:*`.** That auto-runs every MCP tool without prompts — `verify-install.sh` FAILs
+on it.
+
+Install by hand (only if the file does not exist yet — edit the template first):
+
+```bash
+mkdir -p "$HOME/.cursor"
+cp managed-settings/cursor-permissions.json "$HOME/.cursor/permissions.json"
+# Edit: replace "context7" with servers you actually use and trust for auto-run.
+```
+
+Loosen: remove entries from `mcpAllowlist`, or delete the file.
+
+### 0d-2. Global MCP servers (pinned)
+
+File: `~/.cursor/mcp.json`
+(example: `managed-settings/mcp.json.example`)
+
+- Prefer a **small** global file for personal utilities; put stack-specific servers in
+  **`.cursor/mcp.json` inside the repo** (commit it so the team reviews it).
+- Pin versions in `args` (`@scope/pkg@1.2.3`), not `@latest` — pairs with Layer 1
+  `ignore-scripts`.
+- Put secrets in the environment (`${env:GITHUB_TOKEN}`), not in the JSON file.
+- Avoid `envFile` pointing at a project `.env` for third-party servers.
+
+```bash
+mkdir -p "$HOME/.cursor"
+cp managed-settings/mcp.json.example "$HOME/.cursor/mcp.json"
+# Edit: pin real versions (npm view @upstash/context7-mcp version), add only what you need.
+```
+
+Project-level (per repo): `.cursor/mcp.json` in the project root overrides global entries with
+the same server name. Do not open untrusted repos with Agent enabled if the repo ships its own
+`.cursor/mcp.json` — treat that like a dependency you did not review.
+
+### 0d-3. Optional deny hook (secret paths + @latest)
+
+Hooks can **deny** risky MCP calls; they cannot grant auto-approval. Templates:
+`managed-settings/cursor-hooks.json` and `managed-settings/hooks/deny-risky-mcp.sh`.
+
+```bash
+mkdir -p "$HOME/.cursor/hooks"
+cp managed-settings/hooks/deny-risky-mcp.sh "$HOME/.cursor/hooks/"
+chmod +x "$HOME/.cursor/hooks/deny-risky-mcp.sh"
+# Merge beforeMCPExecution into ~/.cursor/hooks.json, or copy the template if you have no hooks yet:
+cp managed-settings/cursor-hooks.json "$HOME/.cursor/hooks.json"
+```
+
+If you already have `~/.cursor/hooks.json`, add the `beforeMCPExecution` block from the
+template instead of overwriting.
+
+The hook reads a JSON object on stdin and inspects `tool_name`, `tool_input`, `command` and
+`url` for references to `.env`, `.ssh`, `.npmrc`, `.netrc`, `git-credentials`, `kube/config`,
+`docker/config.json`, `.aws` and `gcloud`, plus any `@latest`. A match prints
+`{"permission": "deny", ...}`; anything else is allowed through to Cursor's own prompts.
+
+The template uses `"failClosed": true`, so a broken or missing hook blocks the MCP call instead
+of silently allowing it. Loosen to `false` only if the hook proves too disruptive for your
+normal workflow.
+
+### Lock ritual (after you are happy with the files)
+
+Unlock → edit → restart Cursor → verify → lock. Same idea as 0c; includes MCP files.
+
+```bash
+CURSOR_SETTINGS="$HOME/Library/Application Support/Cursor/User/settings.json"
+MCP_JSON="$HOME/.cursor/mcp.json"
+MCP_PERMS="$HOME/.cursor/permissions.json"
+
+# Unlock (only when adding/changing MCP or agent settings)
+chflags nouchg "$CURSOR_SETTINGS" "$MCP_JSON" "$MCP_PERMS" 2>/dev/null || true
+
+# ... edit files, quit and reopen Cursor, confirm MCP still works ...
+
+# Lock (blocks postinstall from silently adding servers or widening auto-run)
+chflags uchg "$CURSOR_SETTINGS"
+[[ -f "$MCP_JSON" ]]   && chflags uchg "$MCP_JSON"
+[[ -f "$MCP_PERMS" ]]  && chflags uchg "$MCP_PERMS"
+```
+
+[`harden-deps.sh`](/reference/harden-deps) prints these paths and copies templates when safe;
+it does **not** run `chflags` for you (you should verify MCP works before locking).
+
+## 0g. Antigravity
+
+No script in this repo sets Layer 0g. Antigravity (Google's agent IDE) has a native terminal
+sandbox plus a permissions engine, but the toggle lives in the user-owned
+`~/.gemini/config/config.json` as `userSettings.enableTerminalSandbox`.
+[`verify-install.sh`](/reference/verify-install) checks for that key being `true` when
+`/Applications/Antigravity.app` exists, and FAILs otherwise. It is defence in depth, not a
+root-anchored layer — and behavioural enforcement needs the IDE running, so the check is an
+artifact check only.
+
+## Next
+
+- [Layer 1 — npm](/guides/layer-1-npm) — the layer whose guard the Codex sandbox undoes.
+- [`verify-install.sh`](/reference/verify-install) — what each Layer 0 row actually probes.

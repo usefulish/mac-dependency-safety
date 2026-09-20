@@ -1,0 +1,221 @@
+---
+title: "harden-deps.sh"
+description: "Applies the scripted hardening layers — what it installs, what it skips, what it never touches, and how to undo each change."
+---
+
+Applies strict dependency-install safety settings. It does only what this documentation
+describes, is re-runnable, and exits 1 if any layer it *tried* to install failed. Skips are not
+failures.
+
+```bash
+bash harden-deps.sh
+```
+
+Run it **from the repo directory** — it resolves templates relative to its own location
+(`SCRIPT_DIR`), but the README-documented invocation is from the checkout root.
+
+<Warning>
+The script uses `sudo` (Layer 0) and changes global npm/pip config. Read it before running it.
+It's short on purpose.
+</Warning>
+
+## Invocation
+
+It takes **no arguments and no flags**. An argument is simply ignored (`set -uo pipefail`, no
+argument parser). It prompts for `sudo` once, at the first Layer 0 block.
+
+## Environment variables it reads
+
+<ParamField path="HOME" type="path">
+  Used for every user-owned destination: `~/.pi/agent/extensions/`, `~/.cursor/`, `~/Brewfile`,
+  and the printed Cursor settings path.
+</ParamField>
+
+<ParamField path="HERMES_MANAGED_DIR" type="string" default="unset">
+  Not used to place files — the script always writes `/etc/hermes/config.yaml`. If this
+  variable is set, the script prints a warning that whoever sets it can repoint the layer.
+</ParamField>
+
+<ParamField path="BASH_SOURCE" type="path">
+  Resolved into `SCRIPT_DIR`, the directory the templates are read from.
+</ParamField>
+
+It also branches on `uname -s`: `Darwin` selects the macOS Claude Code path and enables the
+Cursor and pi blocks; anything else uses the Linux Claude Code path and skips those blocks.
+
+## What it changes, layer by layer
+
+<AccordionGroup>
+  <Accordion title="Layer 0a — Claude Code managed settings">
+    **Source:** `managed-settings/claude.json`
+    **Destination:** `/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
+    `/etc/claude-code/managed-settings.json` elsewhere.
+
+    Creates the directory, copies the template, `chown root:0`, `chmod 644`. Skipped (with a
+    message) if the template is missing. On failure it counts a failure and the run exits 1.
+
+    **Undo:** `sudo rm "/Library/Application Support/ClaudeCode/managed-settings.json"`
+  </Accordion>
+
+  <Accordion title="Layer 0b — Codex managed requirements">
+    **Source:** `managed-settings/codex.toml`
+    **Destination:** `/etc/codex/requirements.toml`, `root:0`, mode 644.
+
+    Note that this destination is **not** backed up before replacement — unlike Hermes and pi,
+    an existing `requirements.toml` is overwritten.
+
+    **Undo:** `sudo rm /etc/codex/requirements.toml`
+  </Accordion>
+
+  <Accordion title="Layer 0f — Hermes managed scope">
+    **Source:** `managed-settings/hermes.yaml`
+    **Destination:** `/etc/hermes/config.yaml`, `root:0`; directory mode 755, file mode 644.
+
+    Skipped entirely if `hermes` is not on `PATH`, or if the template is missing. An existing
+    destination that differs from the template is copied to
+    `/etc/hermes/config.yaml.bak.YYYYMMDDHHMMSS` first; **if that backup cannot be written the
+    script refuses to replace the file** and records a failure.
+
+    Prints a warning if `HERMES_MANAGED_DIR` is set.
+
+    **Undo:** `sudo rm /etc/hermes/config.yaml`, or restore the `.bak.*` copy beside it.
+  </Accordion>
+
+  <Accordion title="Layer 0h — pi sandbox (macOS only)">
+    **Sources:** `managed-settings/pi/sandbox.sb`, `managed-settings/pi/bash`,
+    `managed-settings/pi/ripgrep.conf`, `managed-settings/pi/dependency-safety.ts`
+
+    **Destinations:**
+    - `/etc/pi/sandbox.sb` (root, 644)
+    - `/etc/pi/bash` (root, 755)
+    - `/etc/pi/ripgrep.conf` (root, 644)
+    - `/etc/pi` itself (root, 755)
+    - `~/.pi/agent/extensions/dependency-safety.ts` (your user)
+
+    Skipped if `pi` is not on `PATH`, if the OS is not Darwin, or if any of
+    `sandbox.sb` / `bash` / `dependency-safety.ts` is missing from the templates directory.
+
+    All three root artifacts are compared against the templates and backed up to
+    `<file>.bak.YYYYMMDDHHMMSS` before overwrite; a backup failure on any of them aborts the
+    root half.
+
+    **The extension is installed only after the root half succeeds**, because it fails closed —
+    installing it alone disables pi's bash tool until `/etc/pi` exists.
+
+    **You must restart every running pi process** (interactive sessions and the A2A host) for
+    the extension to load.
+
+    **Undo:** `sudo rm -rf /etc/pi` and `rm ~/.pi/agent/extensions/dependency-safety.ts`, then
+    restart pi. Remove the extension *first* if you want pi's bash tool to keep working.
+  </Accordion>
+
+  <Accordion title="Layer 0e — Cursor MCP (macOS only)">
+    Skipped with a message on any non-Darwin OS, so it never creates `~/.cursor` files for an
+    app that is not there.
+
+    Creates `~/.cursor/hooks/`, then:
+
+    - Copies `managed-settings/cursor-permissions.json` → `~/.cursor/permissions.json`
+      **only if that file does not already exist**.
+    - Copies `managed-settings/mcp.json.example` → `~/.cursor/mcp.json`
+      **only if that file does not already exist**.
+    - Copies `managed-settings/hooks/deny-risky-mcp.sh` → `~/.cursor/hooks/` and `chmod +x`.
+      An existing customized hook that differs is backed up to `<file>.bak.YYYYMMDDHHMMSS`
+      first.
+    - Copies `managed-settings/cursor-hooks.json` → `~/.cursor/hooks.json` **only if you have
+      no `hooks.json` yet**; otherwise it prints a reminder to merge the `beforeMCPExecution`
+      block by hand.
+
+    Then prints the reminder to set Cursor's Auto-run to *Ask every time* or
+    *Allowlist (sandboxed)*, not *Run everything*.
+
+    **Undo:** delete the files it created under `~/.cursor`.
+  </Accordion>
+
+  <Accordion title="Layer 0.5 — Lock Cursor config (print only)">
+    **Changes nothing.** It prints the `chflags uchg` commands for
+    `~/Library/Application Support/Cursor/User/settings.json`, `~/.cursor/mcp.json` and
+    `~/.cursor/permissions.json` (the latter two only if they exist).
+
+    Locking is deliberately left to you, so you can verify MCP still works first. See the
+    [Lock ritual](/guides/layer-0-stop-ai-agents-being-turned-into-accomplices).
+  </Accordion>
+
+  <Accordion title="Layer 1 — npm">
+    Runs `npm config set ignore-scripts true` (writes `~/.npmrc`), then echoes the follow-up
+    habits: `npx puppeteer browsers install chrome`, `npm rebuild <pkg>`,
+    `npx can-i-ignore-scripts`, `npm ci` vs `npm install <pkg>`.
+
+    Skipped if `npm` is not on `PATH`.
+
+    **Undo:** `npm config delete ignore-scripts` (tagged `# LOOSEN:` in the source).
+  </Accordion>
+
+  <Accordion title="Layer 2 — pip">
+    Runs `python3 -m pip config set global.require-virtualenv true`. If that command fails it
+    prints a skip message rather than counting a failure. Then echoes the
+    `--only-binary :all:` and `--require-hashes` habits.
+
+    Skipped if `python3` is not on `PATH`.
+
+    **Undo:** `python3 -m pip config unset global.require-virtualenv` (tagged `# LOOSEN:`).
+  </Accordion>
+
+  <Accordion title="Layer 3 — Homebrew">
+    Runs `brew bundle dump --file=~/Brewfile`. **If `~/Brewfile` already exists it writes to
+    `~/Brewfile.YYYYMMDD` instead** and says so — it never clobbers your Brewfile.
+
+    Then prints the `brew bundle cleanup` dry-run and `--force` commands. It never removes
+    anything.
+
+    Skipped if `brew` is not on `PATH`.
+
+    **Undo:** delete the generated Brewfile. Nothing else was changed.
+  </Accordion>
+</AccordionGroup>
+
+## What it never does
+
+- It does **not** run `chflags` (Layer 0c) — it only prints the commands.
+- It does **not** set Antigravity's terminal-sandbox toggle (Layer 0g).
+- It does **not** install Layer 4's `AGENTS.md`; it prints a reminder at the end.
+- It does **not** remove any package, tap or formula.
+- It does **not** overwrite an existing `~/Brewfile`, `~/.cursor/mcp.json` or
+  `~/.cursor/permissions.json`.
+
+## Output and exit status
+
+Each block prints one of:
+
+| Marker | Meaning |
+|---|---|
+| green `✓` | The layer installed |
+| `–` | Skipped — the tool or template is absent, or the platform does not support the layer |
+| red `✗` | The install chain failed; counted toward the failure total |
+
+The run ends with a **Result** summary listing `npm ignore-scripts`,
+`pip require-virtualenv`, and whether the Claude, Codex, Hermes, pi, Cursor `permissions.json`
+and Cursor `mcp.json` artifacts are present.
+
+If any layer failed it prints a count and **exits 1**. Otherwise it falls off the end with
+status 0. [`onboard-agents.sh`](/reference/onboard-agents) depends on that: before the failure
+counter existed, the script returned the status of its final `printf` and a `sudo cp` error was
+invisible to callers.
+
+## Backups it may leave behind
+
+Re-runs never silently clobber a differing managed file. Look for these if you need to restore:
+
+```text
+/etc/hermes/config.yaml.bak.YYYYMMDDHHMMSS
+/etc/pi/sandbox.sb.bak.YYYYMMDDHHMMSS
+/etc/pi/bash.bak.YYYYMMDDHHMMSS
+/etc/pi/ripgrep.conf.bak.YYYYMMDDHHMMSS
+~/.cursor/hooks/deny-risky-mcp.sh.bak.YYYYMMDDHHMMSS
+~/Brewfile.YYYYMMDD
+```
+
+## Next
+
+- [`verify-install.sh`](/reference/verify-install) — confirm the layers actually bind.
+- [`onboard-agents.sh`](/reference/onboard-agents) — wrap this in a fleet acceptance gate.

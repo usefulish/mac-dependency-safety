@@ -1,0 +1,63 @@
+---
+title: "Layer 3 — Homebrew"
+description: "Homebrew has no ignore-scripts equivalent — the lever is source trust. Plus a version-controlled Brewfile that turns your machine's software into a reviewable allowlist."
+---
+
+`brew` runs as your user on its own prefix, so most installs never get root — good. **But**
+formulae run arbitrary Ruby, and **casks that ship a `.pkg` run the macOS installer as root**
+once you enter your password.
+
+There's no ignore-scripts equivalent here. The lever is *source trust*.
+
+## Source trust rules
+
+- Stick to `homebrew/core` and `homebrew/cask` — reviewed, CI'd, PR process.
+- Treat any third-party `brew tap` like a random npm package: unreviewed code.
+- Install Homebrew itself only from [brew.sh](https://brew.sh) or the official Homebrew GitHub
+  org. Sponsored search results and lookalike "fix your install" pages are a separate malware
+  delivery path.
+- Extra scrutiny for casks installing `.pkg` — those run as root.
+
+## Inspect before installing from an untrusted tap
+
+```bash
+brew info <formula>
+brew cat  <formula>        # read the actual Ruby
+brew deps --tree <formula>
+```
+
+`brew cat` is the one that matters: it prints the formula's Ruby source, which is what will
+actually execute.
+
+<Warning>
+Checksums protect against tampered downloads, not a compromised upstream whose formula was
+updated to match. A correct `sha256` says the bytes are the ones the formula author expected —
+not that the author is still the person you think.
+</Warning>
+
+## Curate instead of accumulate
+
+Snapshot what you have, then treat the file as the allowlist:
+
+```bash
+brew bundle dump --file=~/Brewfile               # snapshot current installs
+brew bundle cleanup --file=~/Brewfile            # dry run: list cruft not listed
+brew bundle cleanup --file=~/Brewfile --force    # actually remove it
+```
+
+Version-control the Brewfile and the machine's software becomes a reviewable allowlist:
+anything installed that isn't in the file shows up in the `cleanup` dry run, and anything added
+to the file lands in a diff you can review. Same discipline as the lockfile in
+[Layer 1](/guides/layer-1-npm).
+
+<Note>
+[`harden-deps.sh`](/reference/harden-deps) runs the `dump` step for you, but will not clobber
+an existing `~/Brewfile` — it writes to `~/Brewfile.YYYYMMDD` instead. It never runs
+`cleanup`; removing software is your call.
+</Note>
+
+## Verify
+
+There is no behavioural probe for this layer. [`verify-install.sh`](/reference/verify-install)
+only checks that `~/Brewfile` exists, and WARNs if it does not. Brew safety is mostly
+behavioural: avoid random taps, and scrutinize casks that install `.pkg`.
