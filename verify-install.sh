@@ -683,16 +683,27 @@ elif [[ -f "$CB_SANDBOX_PROFILE" && -x "$CB_SANDBOX_WRAPPER" ]]; then
       fail "CodeBuddy sandbox allows ~/.claude/.credentials.json — other agents' token stores must stay denied"
     fi
   fi
+  # Own-credential exemption canary — probe the CLI's actual auth material
+  # without reading it. On codebuddy-code 2.156.0 the store is LevelDB-style
+  # local_storage entries (a future .codebuddy/.credentials.json would take
+  # precedence if present); probe the newest entry with head -c 1 >/dev/null.
+  # If this flips to a deny, the CLI can no longer authenticate.
+  cb_own_file=""
   if [[ -f "$HOME/.codebuddy/.credentials.json" ]]; then
-    /usr/bin/sandbox-exec -f "$CB_SANDBOX_PROFILE" -D HOME="$HOME" /bin/sh -c 'head -c 1 "$HOME/.codebuddy/.credentials.json" >/dev/null 2>&1'
+    cb_own_file="$HOME/.codebuddy/.credentials.json"
+  elif [[ -d "$HOME/.codebuddy/local_storage" ]]; then
+    cb_own_file="$(/usr/bin/find "$HOME/.codebuddy/local_storage" -type f -exec stat -f '%m %N' {} + 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+  fi
+  if [[ -n "$cb_own_file" && -f "$cb_own_file" ]]; then
+    /usr/bin/sandbox-exec -f "$CB_SANDBOX_PROFILE" -D HOME="$HOME" /bin/sh -c "head -c 1 '$cb_own_file' >/dev/null 2>&1"
     cb_own_rc=$?
     if [[ "$cb_own_rc" -eq 0 ]]; then
-      pass "CodeBuddy's own credentials stay readable inside the sandbox (deliberate exemption — the CLI authenticates from this file)"
+      pass "CodeBuddy's own auth material stays readable inside the sandbox (deliberate exemption — the CLI authenticates from it): ${cb_own_file#$HOME/}"
     else
-      fail "CodeBuddy's own credentials are denied (rc≠0) — the CLI can no longer authenticate; restore the exemption in $CB_SANDBOX_PROFILE"
+      fail "CodeBuddy's own auth material is denied (rc≠0) — the CLI can no longer authenticate; restore the exemption in $CB_SANDBOX_PROFILE"
     fi
   else
-    warn "no ~/.codebuddy/.credentials.json on this machine (CLI not logged in) — own-credential exemption probe skipped"
+    warn "no CodeBuddy auth material found under ~/.codebuddy (CLI not logged in) — own-credential exemption probe skipped"
   fi
   rm -rf "$cb_probe_dir"
 elif (( cb_presence )); then
