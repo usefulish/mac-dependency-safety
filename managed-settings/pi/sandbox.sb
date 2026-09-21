@@ -107,3 +107,23 @@
 ;; where registry tokens and a repo's own `ignore-scripts=false` would sit.
 ;; pi's in-process `read` tool denies ~/.npmrc regardless (Layer 0a parity).
 (allow file-read-data (home-literal "/.npmrc"))
+
+;; REJECTED EXEMPTION — login.keychain-db (decision 2026-09-20, do not add).
+;; Claude Code 2.1.278 authenticates through /usr/bin/security against
+;; ~/Library/Keychains/login.keychain-db (keychain service "Claude Code-
+;; credentials") and treats an unreadable keychain as "Not logged in", so a
+;; nested `claude --print` cannot use the user's OAuth session under this
+;; profile. Measured: a single `(allow file-read* (home-literal
+;; "/Library/Keychains/login.keychain-db"))` restores nested-claude auth —
+;; and, inseparably, lets ANY command in the sandboxed tree run
+;; `security find-generic-password … -w` headlessly (rc 0, no GUI prompt)
+;; and extract the OAuth token. The two are the same code path: denying
+;; process-exec of /usr/bin/security closes extraction and breaks claude
+;; with it. A shared Seatbelt process tree cannot distinguish legitimate
+;; Claude authentication from arbitrary token extraction. The item's ACL
+;; already permits headless extraction to any process in the user's session
+;; (unsandboxed baseline rc 0), so this deny is the only thing keeping
+;; sandboxed commands out of the keychain — which is exactly Layer 0h's
+;; purpose. DIRECT pi → Claude Code execution is therefore not supported;
+;; delegate authenticated Claude Code execution to an authorized host/A2A
+;; principal (e.g. a Hermes peer) that runs outside this sandbox.
