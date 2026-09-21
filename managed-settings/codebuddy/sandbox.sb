@@ -1,0 +1,154 @@
+;; Layer 0i — CodeBuddy sandbox (macOS Seatbelt profile).
+;;
+;; Install to /etc/codebuddy/sandbox.sb, owned by root (dir 0755, file 0644).
+;; The companion wrapper /etc/codebuddy/codebuddy runs the standalone
+;; CodeBuddy CLI (Homebrew `codebuddy-code`, or the WorkBuddy app bundle's
+;; cli/bin/codebuddy) as
+;;
+;;     sandbox-exec -f /etc/codebuddy/sandbox.sb -D HOME=<home> <real binary> <args>
+;;
+;; so the denials below are enforced by the kernel on the CLI AND every
+;; process it spawns (tool shell commands, MCP servers, node …). A denied
+;; read fails with EPERM ("Operation not permitted"); nothing here matches
+;; command text, so `cat ~/.config/../.ssh/id_rsa`, symlinks and
+;; `$(printf ...)` obfuscation are all caught — the path is resolved by the
+;; kernel, not by us. harden-deps.sh repoints Homebrew's
+;; /opt/homebrew/bin/{codebuddy,cbc} symlinks at the wrapper, so a plain
+;; `codebuddy` invocation — by the user or by malware shelling out to it
+;; (the nx pattern) — lands inside the sandbox.
+;;
+;; The profile is parameterised on HOME (`-D HOME=...` from the wrapper) so
+;; one root-owned file serves every user on the machine.
+;;
+;; Rule order matters: Seatbelt takes the LAST matching rule, so a later
+;; `allow` re-opens something an earlier `deny` closed. That is how ~/.npmrc
+;; is exempted below.
+;;
+;; sandbox-exec is deprecated by Apple but still shipped and enforced on
+;; macOS 26.3.1 (verified 2026-08-30) — the same mechanism Codex's sandbox,
+;; Antigravity's terminal sandbox and this repo's Layer 0h use. Re-probe
+;; after every macOS upgrade: verify-install.sh Layer 0i does exactly that.
+;;
+;; WHAT THIS IS ADDITIVE TO. CodeBuddy already ships `tsbx`, a USERSPACE
+;; sandbox: it brokers the shell commands and tool binaries the CLI itself
+;; launches (shimmed cat/cp/rm/…, deny_write-by-default file rules, a
+;; secret scanner). Its enforcement point is the broker boundary, not the
+;; kernel — coverage is only as wide as the command routing, and nothing
+;; stops a spawned process that sidesteps the shims. This profile is the
+;; kernel-enforced layer UNDER it: whatever tsbx misses, the kernel still
+;; denies. It is additive, not duplicative (record 2bbbc990).
+;;
+;; KNOWN HOLE — hard links that already exist. Every rule here matches a
+;; PATH; a hard link to ~/.ssh/id_rsa planted at an allowed path before the
+;; sandbox runs reads normally (verified 2026-08-30 for the identical Layer
+;; 0h profile). Creating such a link from INSIDE the sandbox is denied (the
+;; file-link rules below), and a hard link needs the same filesystem — so
+;; the hole requires prior local access. Symlinks are not a hole: the kernel
+;; resolves them before matching.
+;;
+;; KNOWN HOLE — CodeBuddy's own credentials are readable by its tools. The
+;; CLI authenticates from ~/.codebuddy/.credentials.json (FileAuthenticationStorage)
+;; and keeps key material under ~/.workbuddy-key-fallback/. The wrapper
+;; sandboxes the CLI itself, not just its tool commands (unlike Layer 0h,
+;; which wraps only pi's bash tool), so these paths MUST stay readable or
+;; the CLI cannot log in — and whatever the CLI can read, its tool commands
+;; can read too, because legacy Seatbelt has no per-process filter
+;; (`(process ...)` is rejected: "unbound variable", probed 2026-09-21).
+;; This layer therefore protects the REST of the system from CodeBuddy's
+;; process tree; it cannot protect CodeBuddy's own token from CodeBuddy.
+;; Same standing as every agent that must read its own credentials.
+
+(version 1)
+(allow default)
+
+;; ---------------------------------------------------------------------------
+;; Credential DIRECTORIES: no read of any kind (data or metadata — listing
+;; ~/.ssh reveals which keys exist) and no write (authorized_keys persistence,
+;; planted kube/gcloud contexts). Mirrors the Layer 0a/0b/0h deny sets plus
+;; GPG, the macOS keychain files and common crypto-wallet stores.
+;; ---------------------------------------------------------------------------
+(define (home-subpath rel)
+  (subpath (string-append (param "HOME") rel)))
+
+(deny file-read* file-write* file-link
+  (home-subpath "/.ssh")
+  (home-subpath "/.aws")
+  (home-subpath "/.gnupg")
+  (home-subpath "/.kube")
+  (home-subpath "/.config/gcloud")
+  (home-subpath "/.config/gh")
+  (home-subpath "/Library/Keychains")
+  ;; Wallets / signing keys. Read-denied whole because a wallet directory is
+  ;; nothing but secrets; extend per machine.
+  (home-subpath "/.bitcoin")
+  (home-subpath "/.ethereum")
+  (home-subpath "/.electrum")
+  (home-subpath "/.config/solana")
+  (home-subpath "/Library/Application Support/Bitcoin")
+  (home-subpath "/Library/Application Support/Electrum")
+  (home-subpath "/Library/Application Support/Exodus")
+  (home-subpath "/Library/Application Support/Ledger Live"))
+
+;; ---------------------------------------------------------------------------
+;; Credential FILES: content read denied; metadata (stat/ls) allowed so shell
+;; tooling that merely checks for existence keeps working.
+;; ---------------------------------------------------------------------------
+(define (home-literal rel)
+  (literal (string-append (param "HOME") rel)))
+
+(deny file-read-data file-link
+  (home-literal "/.netrc")
+  (home-literal "/.git-credentials")
+  (home-literal "/.pypirc")
+  (home-literal "/.docker/config.json")
+  ;; Other agents' API-key stores. CodeBuddy's own store is exempted below —
+  ;; see the KNOWN HOLE note at the top; the OTHER agents' stores have no
+  ;; such offsetting need and stay denied.
+  (home-literal "/.pi/agent/auth.json")
+  (home-literal "/.codex/auth.json")
+  (home-literal "/.claude/.credentials.json")
+  (home-literal "/.hermes/auth.json"))
+
+;; Project secret files, anywhere on the filesystem. Regexes are anchored on
+;; the final path component:
+;;   .env, .env.local, .env.production …  (NOT .envelope, NOT my-environment)
+;;   .envrc                               (direnv)
+;;   .npmrc                               (registry tokens) — see exemption below
+(deny file-read-data file-link
+  (regex #"(^|/)\.env(\.[^/]*)?$")
+  (regex #"(^|/)\.envrc$")
+  (regex #"(^|/)\.npmrc$"))
+
+;; EXEMPTION — ~/.npmrc stays readable. Layer 1 (`npm config set
+;; ignore-scripts true`) lives in that file; with it denied, npm inside the
+;; sandbox silently falls back to ignore-scripts=false and install scripts
+;; run again (verified 2026-08-30 for the identical Layer 0h profile). A
+;; per-project .npmrc is still denied — that is where registry tokens and a
+;; repo's own `ignore-scripts=false` would sit.
+(allow file-read-data (home-literal "/.npmrc"))
+
+;; ---------------------------------------------------------------------------
+;; EXEMPTION (by omission) — CodeBuddy's own state, deliberately NOT denied:
+;;   ~/.codebuddy/**           sessions, settings, plugins, agents, MCP config
+;;                              and the CLI's own ~/.codebuddy/.credentials.json
+;;   ~/.workbuddy-ai/**        blobs, binaries (tsbx runtime downloads), connectors
+;;   ~/.workbuddy/**           shared app state
+;;   ~/.workbuddy-key-fallback/**  connector key material
+;; The CLI reads and writes these in-process to function (login, session
+;; history, its own tsbx runtime), and `(allow default)` above already
+;; permits them; they are listed here so the omission is visibly a decision,
+;; not an oversight. Consequence, stated plainly: a tool command run by
+;; CodeBuddy can read its own token and rewrite its own config (add an MCP
+;; server, edit an agent definition). The kernel layer cannot distinguish
+;; the CLI's legitimate access from its tools' access (no per-process
+;; filter) — this layer's promise is everything OUTSIDE these directories.
+;; ---------------------------------------------------------------------------
+
+;; REJECTED EXEMPTION — login.keychain-db (decision 2026-09-20, do not add).
+;; Same reasoning as Layer 0h, and it applies to CodeBuddy a fortiori:
+;; ~/Library/Keychains is denied above, so a sandboxed CodeBuddy tree cannot
+;; run `security find-generic-password … -w` to extract, e.g., Claude Code's
+;; OAuth token headlessly. Allowing it would hand the same extraction to any
+;; tool command. If CodeBuddy ever authenticates through the keychain and
+;; breaks under this profile, the fix is to exempt CodeBuddy's own
+;; authentication some other way — not to open the keychain to the tree.

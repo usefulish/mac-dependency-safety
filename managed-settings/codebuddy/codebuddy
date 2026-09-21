@@ -1,0 +1,81 @@
+#!/bin/sh
+# Layer 0i — CodeBuddy sandbox wrapper. Install to /etc/codebuddy/codebuddy,
+# root:wheel 0755.
+#
+# harden-deps.sh repoints Homebrew's /opt/homebrew/bin/{codebuddy,cbc}
+# symlinks at this file, so a plain `codebuddy` (or `cbc`) invocation — by
+# the user, by a script, or by malware shelling out to it (the nx pattern:
+# compromised packages invoking local AI CLIs) — runs the real CLI inside
+# the Seatbelt profile /etc/codebuddy/sandbox.sb. Every process the CLI
+# spawns (tool shell commands, MCP servers, node …) inherits the profile.
+#
+# Fail closed: no profile, no CLI. A missing or unreadable profile is a
+# broken layer, not a reason to run unsandboxed.
+PROFILE=/etc/codebuddy/sandbox.sb
+if [ ! -r "$PROFILE" ]; then
+  echo "codebuddy-sandbox: $PROFILE missing or unreadable — Layer 0i is fail-closed, not running unsandboxed" >&2
+  exit 126
+fi
+
+# The profile parameter HOME decides WHICH home's credentials are denied.
+# It is resolved from the directory service (the invoking user's real home),
+# NEVER from the environment: malware that calls `HOME=/tmp/x codebuddy …`
+# (optionally with a stolen CODEBUDDY_API_KEY) must not be able to aim the
+# deny set at a fake home while the agent reads the real one. A non-root
+# process cannot forge its uid, so id -un is trustworthy here. The child's
+# env HOME is left untouched — the CLI may legitimately use it for state.
+SANDBOX_HOME="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+if [ -z "$SANDBOX_HOME" ] || [ ! -d "$SANDBOX_HOME" ]; then
+  # dscl is always present on macOS; if it somehow fails, the environment's
+  # HOME is the fallback — weaker (see above), but a missing home directory
+  # is a broken machine, not an attack.
+  if [ -z "${HOME:-}" ]; then
+    echo "codebuddy-sandbox: could not resolve a home directory for $(id -un) — refusing to run without one to protect" >&2
+    exit 126
+  fi
+  SANDBOX_HOME="$HOME"
+fi
+
+# Homebrew links two entry-point names at this same wrapper. Resolve which
+# one we were invoked as so the matching real binary is executed.
+self="$(basename "$0")"
+[ "$self" = "cbc" ] || self="codebuddy"
+
+# Resolve the real binary, most-trusted pointer first:
+#   1. CODEBUDDY_REAL_BIN — explicit override for non-standard installs. It
+#      only changes WHAT runs, never the profile around it, so it is not an
+#      escape hatch.
+#   2. brew's opt pointer — always the active keg, maintained by brew across
+#      upgrades (this is why the wrapper keeps working after `brew upgrade`
+#      even though the bin/ symlinks were repointed).
+#   3. newest keg under the Cellar, compared numerically (2.10.0 > 2.9.0).
+#   4. the WorkBuddy app bundle's bundled CLI (a node script; node is
+#      resolved from PATH inside the sandbox).
+real=""
+if [ -n "${CODEBUDDY_REAL_BIN:-}" ] && [ -x "${CODEBUDDY_REAL_BIN}" ]; then
+  real="${CODEBUDDY_REAL_BIN}"
+elif [ -x "/opt/homebrew/opt/codebuddy-code/bin/$self" ]; then
+  real="/opt/homebrew/opt/codebuddy-code/bin/$self"
+else
+  set -- /opt/homebrew/Cellar/codebuddy-code/*/bin/"$self"
+  if [ -x "$1" ]; then
+    # Zero-pad each numeric component of the keg version so plain lexical
+    # sort orders 2.10.0 after 2.9.0.
+    real="$(printf '%s\n' "$@" | awk -F/ -v OFS=' ' '
+      { v = $0
+        sub(".*/codebuddy-code/", "", v); sub("/.*", "", v)
+        split(v, n, ".")
+        printf "%05d.%05d.%05d %s\n", n[1]+0, n[2]+0, n[3]+0, $0
+      }' | sort -r | head -1 | cut -d' ' -f2-)"
+  fi
+  if [ -z "$real" ] && [ "$self" = "codebuddy" ] \
+     && [ -x "/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy" ]; then
+    real="/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
+  fi
+fi
+if [ -z "$real" ] || [ ! -x "$real" ]; then
+  echo "codebuddy-sandbox: could not locate the real $self binary (tried CODEBUDDY_REAL_BIN, /opt/homebrew/opt/codebuddy-code, Cellar kegs, WorkBuddy app bundle) — not running unsandboxed" >&2
+  exit 127
+fi
+
+exec /usr/bin/sandbox-exec -f "$PROFILE" -D HOME="$SANDBOX_HOME" "$real" "$@"
