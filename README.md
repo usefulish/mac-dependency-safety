@@ -199,8 +199,12 @@ the tools pi already has, in two halves that are only useful together.
 
 **Root half — the wall.** A Seatbelt profile (the same `sandbox-exec` mechanism
 Codex and Antigravity use on macOS) denies reads of credential paths, and a
-wrapper runs every agent command under it. Because the kernel resolves the
-path, `cat ~/.config/../.ssh/id_rsa`, symlinks and `$(printf …)` tricks all
+wrapper runs every agent command under it. The wrapper resolves the sandboxed
+home from the directory service (`dscl . -read /Users/$(id -un)
+NFSHomeDirectory`), never from the environment — so `HOME=/tmp/x
+/etc/pi/bash …` cannot aim the deny set at a fake home while the command reads
+the real one (same hardening as the Layer 0i CodeBuddy wrapper). Because the
+kernel resolves the path, `cat ~/.config/../.ssh/id_rsa`, symlinks and `$(printf …)` tricks all
 fail the same way: `Operation not permitted`. Child processes inherit it.
 
 ```bash
@@ -283,6 +287,7 @@ Verify behaviourally, both directions, plus the Layer 1 interaction:
 /etc/pi/bash -c 'ls ~/.ssh'                    # expect: Operation not permitted
 /etc/pi/bash -c 'cat /etc/hosts'               # expect: success
 /etc/pi/bash -c 'npm config get ignore-scripts' # expect: same as outside (true)
+env HOME=/private/tmp/fakehome /etc/pi/bash -c "ls $HOME/.ssh"  # expect: Operation not permitted (wrapper ignores a faked env HOME)
 stat -f '%Su:%Sg %Lp' /etc/pi /etc/pi/*         # expect: root:wheel 755 (dir, bash) / 644 (sandbox.sb, ripgrep.conf)
 cmp ~/.pi/agent/extensions/dependency-safety.ts managed-settings/pi/dependency-safety.ts  # expect: silent
 bash verify-install.sh                          # Layer 0h section does all of the above
@@ -301,6 +306,107 @@ name; a `write` under a symlink to `~/.ssh` was blocked with no artifact;
 symlink were all denied while `grep` with `glob *.txt` and a path-less `grep`
 ran with `.env` excluded. A2A child sessions load the same global extension
 set but were not exercised (the host needs a restart first).
+
+### 0i. CodeBuddy (standalone CLI) sandbox
+
+Files: `/etc/codebuddy/sandbox.sb`, `/etc/codebuddy/codebuddy` (root-owned),
+plus repointed `/opt/homebrew/bin/{codebuddy,cbc}` symlinks
+(templates: [`managed-settings/codebuddy/`](./managed-settings/codebuddy/))
+
+[CodeBuddy Code](https://www.codebuddy.ai) (Tencent; Homebrew tap
+`tencent-codebuddy/tap/codebuddy-code`) ships its own sandbox — `tsbx`, a
+USERSPACE brokering model (shimmed coreutils, `deny_write`-by-default file
+rules, a bundled secret scanner) enforced at the broker boundary, only as
+wide as the command routing. It is **not** kernel enforcement, and unlike
+Codex/Antigravity it does not use Seatbelt itself. This layer adds the
+missing kernel half, in the same shape as 0h: a HOME-parameterised Seatbelt
+profile and a wrapper around the CLI, so the profile's denies bind the CLI
+**and every process it spawns** (tool shell commands, MCP servers, node).
+A denied read fails with EPERM; `cat ~/.config/../.ssh/id_rsa`, symlinks and
+`$(printf …)` tricks all fail identically because the kernel resolves the
+path.
+
+The denials mirror Layer 0h (same credential directories and files, same
+`.env`/`.envrc`/`.npmrc` rules, same `~/.npmrc` Layer-1 exemption), with two
+CodeBuddy-specific differences stated in the profile itself:
+
+- **CodeBuddy's own credentials stay readable — deliberately.** The CLI
+  authenticates from `~/.codebuddy/.credentials.json` and keeps connector
+  keys under `~/.workbuddy-key-fallback/`. Unlike 0h (which wraps only pi's
+  bash tool), this wrapper sandboxes the CLI itself, so these paths must
+  stay readable or the CLI cannot log in. Legacy Seatbelt has no
+  per-process filter (`(process …)` is rejected: "unbound variable",
+  probed 2026-09-21), so the exemption is process-tree-wide: this layer
+  protects the REST of the system from CodeBuddy's process tree — including
+  other agents' auth stores, which stay denied — but it cannot protect
+  CodeBuddy's own token from CodeBuddy's tools.
+- **The profile's home is resolved from the directory service, not the
+  environment.** The wrapper runs `dscl . -read /Users/$(id -un)
+  NFSHomeDirectory` for the `-D HOME=` parameter, so
+  `HOME=/tmp/x codebuddy …` (optionally with a stolen `CODEBUDDY_API_KEY`)
+  cannot aim the deny set at a fake home while the agent reads the real one.
+  A non-root process cannot forge its uid.
+
+```bash
+sudo mkdir -p /etc/codebuddy
+sudo cp managed-settings/codebuddy/sandbox.sb /etc/codebuddy/sandbox.sb
+sudo cp managed-settings/codebuddy/codebuddy   /etc/codebuddy/codebuddy
+sudo chown -R root:wheel /etc/codebuddy
+sudo chmod 755 /etc/codebuddy /etc/codebuddy/codebuddy
+sudo chmod 644 /etc/codebuddy/sandbox.sb
+# Repoint the Homebrew entry points at the wrapper (harden-deps.sh does this;
+# by hand it is two lines — record the original target first):
+readlink /opt/homebrew/bin/codebuddy   # e.g. ../Cellar/codebuddy-code/2.156.0/bin/codebuddy
+ln -sf /etc/codebuddy/codebuddy /opt/homebrew/bin/codebuddy
+ln -sf /etc/codebuddy/codebuddy /opt/homebrew/bin/cbc
+```
+
+**How interposition works and what breaks it.** The wrapper resolves the
+real binary itself — brew's `opt/codebuddy-code` pointer first (maintained
+across `brew upgrade`), then the newest Cellar keg, then the WorkBuddy app
+bundle's bundled CLI — and fails closed (exit 126/127) if it cannot find a
+profile or a binary. `brew upgrade` keeps working through the wrapper; if
+brew ever relinks the bin/ symlinks back to the Cellar, the CLI silently
+runs unsandboxed again — `verify-install.sh` reports that as a FAIL and
+re-running `harden-deps.sh` restores it.
+
+**Know what this is not.**
+
+- The bin/ symlinks live in the user-writable `/opt/homebrew/bin`, so this
+  layer's pointer half has Layer 0c/0h-extension standing (a speed bump),
+  not 0a/0b/0f standing. The wall (`/etc/codebuddy`) is root-owned; the
+  pointer can be undone by anything running as you.
+- Scope is the **standalone** CLI only. The CodeBuddy CLI inside the
+  WorkBuddy AI app runs inside WorkBuddy's own brokering, where nested
+  Seatbelt fails (rc 71, record `88bdff6c`) — it is covered only by tsbx's
+  userspace rules and is out of this repo's reach.
+- CodeBuddy's own state directories (`~/.codebuddy`, `~/.workbuddy-ai`,
+  `~/.workbuddy`, `~/.workbuddy-key-fallback`) are allowed read/write by
+  design — including its own token (above) and its own config, so a tool
+  command can still rewrite `~/.codebuddy/.mcp.json` or an agent definition.
+- Nested-sandbox limits of 0h apply equally: `launchctl` operations fail and
+  plain `ssh` loses `~/.ssh` access inside the profile (by design).
+- `sandbox-exec` is deprecated by Apple; still enforced on macOS 26.3.1.
+  The verify probe tells you when that changes.
+
+Verify behaviourally:
+
+```bash
+/etc/codebuddy/codebuddy --version                        # expect: 2.156.0 (CLI runs under the profile)
+readlink /opt/homebrew/bin/codebuddy /opt/homebrew/bin/cbc  # expect: both /etc/codebuddy/codebuddy
+sudo /usr/bin/sandbox-exec -f /etc/codebuddy/sandbox.sb -D HOME="$HOME" /bin/sh -c 'ls ~/.ssh'   # expect: Operation not permitted
+bash verify-install.sh                                    # Layer 0i section does all of the above
+```
+
+Runtime receipt (2026-09-21, codebuddy-code 2.156.0, macOS 26.3.1,
+delegated to an unsandboxed peer because nested profiles are kernel-rejected
+rc 71): 27/27 probes pass — full fake-home deny/allow matrix (15 rows,
+including traversal, symlink, hard-link and write probes), the real CLI
+under the profile (`--version` → 2.156.0), wrapper resolution for both entry
+point names, fail-closed on a missing profile, Cellar fallback without the
+opt pointer, the env-HOME mismatch defence (fake `HOME` still denies the
+real `~/.ssh`), npm ignore-scripts parity, and other-agent auth stores
+denied.
 
 ### 0c. Cursor settings (a speed bump, not a wall)
 > **Temp-worker note (2026-08-30, decision `c983f950`):** on this fleet Cursor is
@@ -678,8 +784,8 @@ Where the harness differs, the layer differs — say so in the machine card:
 
 | Platform | Applies | Does not apply | Watch for |
 |---|---|---|---|
-| macOS (kimchi, laksa) | scripted: 0a, 0b, 0e, 0f, 0h, 1–3; manual: 0c (`chflags` lock ritual), 0g (Antigravity toggle) | — | restart pi hosts / Hermes gateways after install; 0c/0g still FAIL the gate until done by hand |
-| Linux (bingsu) | 0a (`/etc/claude-code/managed-settings.json`), 0b, 0f, 1, 2 | 0h (`sandbox-exec`), Cursor 0c–0e, Homebrew — `harden-deps.sh` skips them on Linux, and `verify-install.sh` reports 0h as a WARN (not applicable) instead of a FAIL | pi on Linux stays **unsandboxed** until a bubblewrap port exists |
+| macOS (kimchi, laksa) | scripted: 0a, 0b, 0e, 0f, 0h, 0i, 1–3; manual: 0c (`chflags` lock ritual), 0g (Antigravity toggle) | — | restart pi hosts / Hermes gateways after install; 0c/0g still FAIL the gate until done by hand |
+| Linux (bingsu) | 0a (`/etc/claude-code/managed-settings.json`), 0b, 0f, 1, 2 | 0h/0i (`sandbox-exec`), Cursor 0c–0e, Homebrew — `harden-deps.sh` skips them on Linux, and `verify-install.sh` reports 0h/0i as WARNs (not applicable) instead of FAILs | pi on Linux stays **unsandboxed** until a bubblewrap port exists |
 | Unraid (rougamo) | as Linux, but `/etc` is rebuilt at boot | as Linux | re-apply root-owned files from `/boot/config/go`; agents run as **root**, which bypasses Layer 0f and makes any root-owned "ceiling" editable |
 
 Not everything is scripted: Layer 0c is a manual `chflags` ritual (the script
@@ -698,14 +804,14 @@ After you've read [`harden-deps.sh`](./harden-deps.sh) and the
 [`managed-settings/`](./managed-settings/) templates it may install:
 ```bash
 less harden-deps.sh        # actually read it
-bash harden-deps.sh        # applies the scripted layers 0a, 0b, 0e, 0f, 0h (where the harness is installed)
+bash harden-deps.sh        # applies the scripted layers 0a, 0b, 0e, 0f, 0h, 0i (where the harness is installed)
                            # and 1-3; prompts for sudo once; exits 1 if any layer fails to install.
                            # 0c (chflags) and 0g (Antigravity) stay manual — see their sections.
 ```
 Layer 4 (`AGENTS.md`) is manual — project or global install per section above.
 Layer 0h's extension is installed only after its root half succeeds (it fails
-closed); Layers 0f and 0h are skipped when `hermes`/`pi` are not on PATH, and 0h
-is skipped on Linux.
+closed); Layers 0f and 0h are skipped when `hermes`/`pi` are not on PATH, and
+0h and 0i are skipped on Linux.
 It guards each tool behind a presence check, won't clobber an existing
 `~/Brewfile` or existing `~/.cursor/mcp.json`, tags every loosenable line with
 `# LOOSEN:`, and prints final state. Nothing in it isn't in this README.

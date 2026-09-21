@@ -482,6 +482,61 @@ if [[ -f "$PI_SANDBOX_PROFILE" && -x "$PI_SANDBOX_WRAPPER" && -f "$PI_SANDBOX_RG
       fail "Layer 1 defeated inside the pi sandbox: ignore-scripts is '${pi_npm_inside:-<none>}' inside vs '$pi_npm_outside' outside — ~/.npmrc must stay readable"
     fi
   fi
+
+  # env-HOME mismatch defence (dscl-hardened wrapper): with a faked env HOME
+  # the deny set must still follow the directory-service home, so listing the
+  # REAL ~/.ssh must be denied. A legacy env-trusting wrapper aims -D HOME at
+  # the fake home and this probe reads the real ~/.ssh — reported as FAIL
+  # with the refresh command. The real path is expanded here, at probe
+  # construction time, so the child cannot redirect it via its own env.
+  if [[ -d "$HOME/.ssh" ]]; then
+    pi_mismatch_scratch="$(mktemp -d)"
+    pi_mismatch_out="$(env HOME="$pi_mismatch_scratch" "$PI_SANDBOX_WRAPPER" -c "ls '$HOME/.ssh'" 2>&1)"
+    pi_mismatch_rc=$?
+    rm -rf "$pi_mismatch_scratch"
+    if [[ "$pi_mismatch_rc" -ne 0 && "$pi_mismatch_out" == *"Operation not permitted"* ]]; then
+      pass "pi wrapper resolves the sandboxed home from the directory service (faked env HOME still denied)"
+    else
+      fail "pi wrapper trusts env HOME — 'HOME=<fake> /etc/pi/bash …' aims the deny set away from the real home (rc=$pi_mismatch_rc) — re-run harden-deps.sh to refresh /etc/pi/bash"
+    fi
+  fi
+
+  # Claude Code auth path must stay DENIED (decision 2026-09-20, see the
+  # REJECTED EXEMPTION block in managed-settings/pi/sandbox.sb): Claude Code
+  # 2.1.278 authenticates through /usr/bin/security against
+  # login.keychain-db, and a shared Seatbelt process tree cannot distinguish
+  # that authentication from arbitrary `security … -w` token extraction.
+  # These probes are the regression guard against re-adding the exemption:
+  # readable-keychain == sandboxed token exfiltration. All probes use
+  # `head -c 1 > /dev/null` / directory listing only — no keychain or
+  # credential content is ever read or printed.
+  if [[ -f "$HOME/Library/Keychains/login.keychain-db" ]]; then
+    pi_kc_out="$($PI_SANDBOX_WRAPPER -c "head -c 1 '$HOME/Library/Keychains/login.keychain-db' >/dev/null 2>&1" 2>&1)"
+    pi_kc_rc=$?
+    if [[ "$pi_kc_rc" -ne 0 ]]; then
+      pass "pi sandbox denies login.keychain-db with EPERM (direct pi→Claude rejected; delegate to a host/A2A principal)"
+    else
+      fail "pi sandbox allows login.keychain-db (rc=0) — the rejected exemption is present: any sandboxed command can extract the Claude OAuth token headlessly. Remove the allow from sandbox.sb"
+    fi
+    pi_kcdir_out="$($PI_SANDBOX_WRAPPER -c "ls '$HOME/Library/Keychains'" 2>&1)"
+    pi_kcdir_rc=$?
+    if [[ "$pi_kcdir_rc" -ne 0 && "$pi_kcdir_out" == *"Operation not permitted"* ]]; then
+      pass "pi sandbox denies the ~/Library/Keychains listing with EPERM"
+    else
+      fail "pi sandbox did not deny ~/Library/Keychains listing (rc=$pi_kcdir_rc: ${pi_kcdir_out:0:80})"
+    fi
+  else
+    warn "no login.keychain-db on this machine — skipping Claude Code auth-path probes"
+  fi
+  if [[ -f "$HOME/.claude/.credentials.json" ]]; then
+    "$PI_SANDBOX_WRAPPER" -c "head -c 1 '$HOME/.claude/.credentials.json' >/dev/null 2>&1"
+    pi_ccfile_rc=$?
+    if [[ "$pi_ccfile_rc" -ne 0 ]]; then
+      pass "pi sandbox denies ~/.claude/.credentials.json (readability probe only)"
+    else
+      fail "pi sandbox allows ~/.claude/.credentials.json — it must stay denied: claude authenticates via the keychain, so this file has no auth offsetting its exposure"
+    fi
+  fi
 else
   if (( pi_installed )); then
     if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -518,6 +573,161 @@ else
   else
     warn "pi dependency-safety extension not found: $PI_EXTENSION"
   fi
+fi
+
+say "Layer 0i: CodeBuddy sandbox"
+
+# The standalone CodeBuddy CLI (Homebrew codebuddy-code) ships its own tsbx
+# USERSPACE sandbox (brokered shell/shim boundary) but no kernel layer. Layer
+# 0i adds one: a ROOT-owned /etc/codebuddy (Seatbelt profile + wrapper) that
+# harden-deps.sh installs, with the Homebrew /opt/homebrew/bin/{codebuddy,cbc}
+# symlinks repointed at the wrapper so a plain `codebuddy` invocation — by a
+# user or by malware shelling out to the CLI — runs inside the profile.
+# Standing is split exactly like 0h: /etc/codebuddy is the wall; the bin/
+# symlinks live in a user-writable directory (a repoint back — e.g. a brew
+# relink after an upgrade — is a gap, not a warning). Probes run the REAL
+# wrapper and the REAL installed profile and assert both directions plus the
+# two known interaction hazards: npm ignore-scripts parity (the ~/.npmrc
+# exemption) and the deliberate readability of CodeBuddy's own credentials
+# (its auth must stay readable or the CLI cannot log in; there is no
+# per-process Seatbelt filter to narrow it).
+# Probe fixtures are created at runtime; nothing here reads a real secret.
+CB_SANDBOX_DIR="/etc/codebuddy"
+CB_SANDBOX_PROFILE="$CB_SANDBOX_DIR/sandbox.sb"
+CB_SANDBOX_WRAPPER="$CB_SANDBOX_DIR/codebuddy"
+CB_BREW_BIN="/opt/homebrew/bin"
+CB_TEMPLATE_DIR="$SCRIPT_DIR/managed-settings/codebuddy"
+cb_presence=0
+[[ -d "/opt/homebrew/Cellar/codebuddy-code" ]] && cb_presence=1
+command -v codebuddy >/dev/null 2>&1 && cb_presence=1
+command -v cbc >/dev/null 2>&1 && cb_presence=1
+
+cb_artifact_ok() {
+  local path="$1" want_mode="$2" owner mode
+  owner="$(stat -f '%u' "$path" 2>/dev/null)" || return 1
+  mode="$(stat -f '%Lp' "$path" 2>/dev/null)" || return 1
+  [[ "$owner" == "0" && "$mode" == "$want_mode" ]]
+}
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  if (( cb_presence )); then
+    warn "CodeBuddy is installed but Layer 0i is not applicable on $(uname -s) (sandbox-exec is macOS-only) — the CLI runs UNSANDBOXED here"
+  else
+    warn "CodeBuddy not installed; layer 0i not applicable"
+  fi
+elif [[ -f "$CB_SANDBOX_PROFILE" && -x "$CB_SANDBOX_WRAPPER" ]]; then
+  pass "CodeBuddy sandbox profile and wrapper exist under $CB_SANDBOX_DIR"
+  for spec in "$CB_SANDBOX_DIR:755" "$CB_SANDBOX_WRAPPER:755" "$CB_SANDBOX_PROFILE:644"; do
+    cb_file="${spec%%:*}"
+    cb_mode="${spec##*:}"
+    if cb_artifact_ok "$cb_file" "$cb_mode"; then
+      pass "CodeBuddy sandbox artifact is root-owned mode $cb_mode: $cb_file"
+    else
+      fail "CodeBuddy sandbox artifact is not root-owned mode $cb_mode: $cb_file ($(stat -f '%Su:%Sg %Lp' "$cb_file" 2>/dev/null)) — run: sudo chown root:wheel $cb_file && sudo chmod $cb_mode $cb_file"
+    fi
+  done
+  if [[ -f "$CB_TEMPLATE_DIR/sandbox.sb" ]] && ! cmp -s "$CB_SANDBOX_PROFILE" "$CB_TEMPLATE_DIR/sandbox.sb"; then
+    fail "CodeBuddy profile differs from this checkout's template (stale): $CB_SANDBOX_PROFILE — re-run harden-deps.sh"
+  fi
+
+  # The bin links are the pointer half. A drift back to the Cellar (a brew
+  # upgrade relink, or a manual restore) silently un-sandboxes the CLI.
+  for cb_link in codebuddy cbc; do
+    cb_path="$CB_BREW_BIN/$cb_link"
+    if [[ -L "$cb_path" && "$(readlink "$cb_path")" == "$CB_SANDBOX_WRAPPER" ]]; then
+      pass "CodeBuddy entry point runs through the sandbox wrapper: $cb_path"
+    elif [[ -e "$cb_path" ]]; then
+      fail "CodeBuddy entry point bypasses the sandbox: $cb_path -> $(readlink "$cb_path" 2>/dev/null || echo '(not a symlink)') — re-run harden-deps.sh"
+    else
+      warn "CodeBuddy entry point not linked at $cb_path (formula may not provide it)"
+    fi
+  done
+
+  # Behavioural probes through the REAL wrapper and the REAL profile.
+  cb_probe_dir="$(mktemp -d)"
+  printf 'PROBE=1\n' > "$cb_probe_dir/.env"
+  printf 'benign\n' > "$cb_probe_dir/.envelope"
+  out="$("$CB_SANDBOX_WRAPPER" --version 2>&1)"; cb_version_rc=$?
+  if [[ "$cb_version_rc" -eq 0 && -n "$out" ]]; then
+    pass "CodeBuddy CLI runs under the profile ($out) — no sandbox-exec nesting conflict"
+  else
+    fail "CodeBuddy CLI failed under its sandbox wrapper (rc=$cb_version_rc: ${out:0:80})"
+  fi
+  cb_deny_out="$(/usr/bin/sandbox-exec -f "$CB_SANDBOX_PROFILE" -D HOME="$HOME" /bin/sh -c 'ls "$HOME/.ssh"' 2>&1)"
+  cb_deny_rc=$?
+  if [[ "$cb_deny_rc" -ne 0 && "$cb_deny_out" == *"Operation not permitted"* ]]; then
+    pass "CodeBuddy sandbox denies ~/.ssh with EPERM"
+  else
+    fail "CodeBuddy sandbox did not deny ~/.ssh with EPERM (rc=$cb_deny_rc: ${cb_deny_out:0:80})"
+  fi
+  cb_env_out="$(/usr/bin/sandbox-exec -f "$CB_SANDBOX_PROFILE" -D HOME="$HOME" /bin/sh -c "cat '$cb_probe_dir/.env'" 2>&1)"
+  cb_env_rc=$?
+  if [[ "$cb_env_rc" -ne 0 && "$cb_env_out" == *"Operation not permitted"* ]]; then
+    pass "CodeBuddy sandbox denies .env with EPERM"
+  else
+    fail "CodeBuddy sandbox did not deny .env with EPERM (rc=$cb_env_rc: ${cb_env_out:0:80})"
+  fi
+  /usr/bin/sandbox-exec -f "$CB_SANDBOX_PROFILE" -D HOME="$HOME" /bin/sh -c "cat '$cb_probe_dir/.envelope'" >/dev/null 2>&1
+  cb_benign_rc=$?
+  /usr/bin/sandbox-exec -f "$CB_SANDBOX_PROFILE" -D HOME="$HOME" /bin/sh -c 'cat /etc/hosts' >/dev/null 2>&1
+  cb_control_rc=$?
+  if [[ "$cb_benign_rc" -eq 0 && "$cb_control_rc" -eq 0 ]]; then
+    pass "CodeBuddy sandbox leaves benign reads alone (.envelope, /etc/hosts)"
+  else
+    fail "CodeBuddy sandbox is over-broad or broken (benign_rc=$cb_benign_rc control_rc=$cb_control_rc)"
+  fi
+  if have npm; then
+    cb_npm_outside="$(cd / && npm config get ignore-scripts 2>/dev/null)"
+    cb_npm_inside="$(/usr/bin/sandbox-exec -f "$CB_SANDBOX_PROFILE" -D HOME="$HOME" /bin/sh -c 'cd / && npm config get ignore-scripts' 2>/dev/null)"
+    if [[ -n "$cb_npm_inside" && "$cb_npm_inside" == "$cb_npm_outside" ]]; then
+      pass "npm reports the same ignore-scripts inside the CodeBuddy sandbox ($cb_npm_inside) — Layer 1 intact"
+    else
+      fail "Layer 1 defeated inside the CodeBuddy sandbox: ignore-scripts is '${cb_npm_inside:-<none>}' inside vs '$cb_npm_outside' outside — ~/.npmrc must stay readable"
+    fi
+  fi
+
+  # Both halves of the credentials story, probed where the files exist:
+  # OTHER agents' auth stores must stay DENIED; CodeBuddy's OWN store must
+  # stay READABLE (the CLI authenticates from it — see the KNOWN HOLE note
+  # in the profile). The second probe is the exemption canary: if it flips
+  # to a deny, the CLI can no longer log in; if the first flips to an allow,
+  # other agents' tokens are exposed to CodeBuddy's process tree.
+  if [[ -f "$HOME/.claude/.credentials.json" ]]; then
+    /usr/bin/sandbox-exec -f "$CB_SANDBOX_PROFILE" -D HOME="$HOME" /bin/sh -c 'head -c 1 "$HOME/.claude/.credentials.json" >/dev/null 2>&1'
+    cb_ccfile_rc=$?
+    if [[ "$cb_ccfile_rc" -ne 0 ]]; then
+      pass "CodeBuddy sandbox denies ~/.claude/.credentials.json (readability probe only)"
+    else
+      fail "CodeBuddy sandbox allows ~/.claude/.credentials.json — other agents' token stores must stay denied"
+    fi
+  fi
+  # Own-credential exemption canary — probe the CLI's actual auth material
+  # without reading it. On codebuddy-code 2.156.0 the store is LevelDB-style
+  # local_storage entries (a future .codebuddy/.credentials.json would take
+  # precedence if present); probe the newest entry with head -c 1 >/dev/null.
+  # If this flips to a deny, the CLI can no longer authenticate.
+  cb_own_file=""
+  if [[ -f "$HOME/.codebuddy/.credentials.json" ]]; then
+    cb_own_file="$HOME/.codebuddy/.credentials.json"
+  elif [[ -d "$HOME/.codebuddy/local_storage" ]]; then
+    cb_own_file="$(/usr/bin/find "$HOME/.codebuddy/local_storage" -type f -exec stat -f '%m %N' {} + 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+  fi
+  if [[ -n "$cb_own_file" && -f "$cb_own_file" ]]; then
+    /usr/bin/sandbox-exec -f "$CB_SANDBOX_PROFILE" -D HOME="$HOME" /bin/sh -c "head -c 1 '$cb_own_file' >/dev/null 2>&1"
+    cb_own_rc=$?
+    if [[ "$cb_own_rc" -eq 0 ]]; then
+      pass "CodeBuddy's own auth material stays readable inside the sandbox (deliberate exemption — the CLI authenticates from it): ${cb_own_file#$HOME/}"
+    else
+      fail "CodeBuddy's own auth material is denied (rc≠0) — the CLI can no longer authenticate; restore the exemption in $CB_SANDBOX_PROFILE"
+    fi
+  else
+    warn "no CodeBuddy auth material found under ~/.codebuddy (CLI not logged in) — own-credential exemption probe skipped"
+  fi
+  rm -rf "$cb_probe_dir"
+elif (( cb_presence )); then
+  fail "CodeBuddy sandbox not installed (standalone CLI is installed): need $CB_SANDBOX_PROFILE and $CB_SANDBOX_WRAPPER — run harden-deps.sh"
+else
+  warn "CodeBuddy sandbox not found: $CB_SANDBOX_DIR (standalone CLI not installed)"
 fi
 
 say "Layer 0.5: Immutable config files"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # harden-deps.sh - apply strict dependency-install safety settings (macOS;
-# Layers 0a/0b/0f/1/2 also apply on Linux — 0h and 0c-0e are macOS-only).
+# Layers 0a/0b/0f/0i/1/2 also apply on Linux — 0h and 0c-0e are macOS-only).
 # Companion to the README in this repo. READ BOTH BEFORE RUNNING.
 #
 # This uses sudo (Layer 0) and changes global npm/pip config. It does only what
@@ -154,6 +154,68 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+say "Layer 0i: CodeBuddy sandbox (Seatbelt wrapper around the standalone CLI)"
+SRC_CB_DIR="$SCRIPT_DIR/managed-settings/codebuddy"
+DEST_DIR_CB="/etc/codebuddy"
+BREW_BIN="/opt/homebrew/bin"
+cb_installed=0
+if [[ -d "/opt/homebrew/Cellar/codebuddy-code" ]] || command -v codebuddy >/dev/null 2>&1 || command -v cbc >/dev/null 2>&1; then
+  cb_installed=1
+fi
+cb_root_ok=0
+if (( ! cb_installed )); then
+  skip "codebuddy (standalone CLI) not found - skipping Layer 0i (re-run after 'brew install codebuddy-code')"
+elif [[ "$OS_NAME" != "Darwin" ]]; then
+  skip "Layer 0i uses macOS sandbox-exec; on Linux CodeBuddy stays UNSANDBOXED by this repo (README 0i)"
+elif [[ ! -f "$SRC_CB_DIR/sandbox.sb" || ! -f "$SRC_CB_DIR/codebuddy" ]]; then
+  skip "CodeBuddy templates not found under $SRC_CB_DIR"
+else
+  echo "  Installing CodeBuddy sandbox (root half)..."
+  cb_backup_ok=1
+  for cb_file in sandbox.sb codebuddy; do
+    backup_if_differs "$DEST_DIR_CB/$cb_file" "$SRC_CB_DIR/$cb_file" || cb_backup_ok=0
+  done
+  if (( ! cb_backup_ok )); then
+    bad "CodeBuddy: refusing to replace $DEST_DIR_CB — backup failed"
+  else
+    sudo mkdir -p "$DEST_DIR_CB" \
+      && sudo cp "$SRC_CB_DIR/sandbox.sb" "$SRC_CB_DIR/codebuddy" "$DEST_DIR_CB/" \
+      && sudo chown -R "$ROOT_OWNER" "$DEST_DIR_CB" \
+      && sudo chmod 755 "$DEST_DIR_CB" "$DEST_DIR_CB/codebuddy" \
+      && sudo chmod 644 "$DEST_DIR_CB/sandbox.sb" \
+      && cb_root_ok=1 \
+      && ok "CodeBuddy: /etc/codebuddy installed (probe: /etc/codebuddy/codebuddy --version runs under the profile)" \
+      || bad "CodeBuddy: root-half install FAILED at $DEST_DIR_CB"
+  fi
+  # Interposition: repoint the Homebrew entry-point symlinks at the wrapper so
+  # a plain `codebuddy` (or `cbc`) — by the user or by malware shelling out to
+  # the CLI (the nx pattern) — lands inside the sandbox. Only symlinks into
+  # the formula's Cellar (brew's own state, recreatable with `brew link`) or
+  # links already pointing here are touched; anything else is left alone.
+  # The symlink lives in a user-writable directory, so this half has Layer
+  # 0c/0h-extension standing (a speed bump), not the root-owned wall's.
+  if (( cb_root_ok )); then
+    for cb_link in codebuddy cbc; do
+      cb_path="$BREW_BIN/$cb_link"
+      if [[ ! -L "$cb_path" && ! -e "$cb_path" ]]; then
+        skip "CodeBuddy: $cb_path not linked by brew — nothing to repoint"
+      elif [[ -L "$cb_path" && "$(readlink "$cb_path")" == "$DEST_DIR_CB/codebuddy" ]]; then
+        ok "CodeBuddy: $cb_path already points at the wrapper"
+      elif [[ -L "$cb_path" && "$(readlink "$cb_path")" == *"Cellar/codebuddy-code"* ]]; then
+        cb_old_target="$(readlink "$cb_path")"
+        ln -sf "$DEST_DIR_CB/codebuddy" "$cb_path" \
+          && ok "CodeBuddy: $cb_path repointed at the wrapper (was $cb_old_target; brew can restore it with 'brew link --overwrite codebuddy-code')" \
+          || bad "CodeBuddy: failed to repoint $cb_path"
+      else
+        skip "CodeBuddy: $cb_path is not a brew-managed symlink — leaving it alone (README 0i)"
+      fi
+    done
+  else
+    skip "CodeBuddy: bin links NOT repointed because the root half failed (fail-closed wrapper would shadow the working CLI)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 say "Layer 0e: Cursor MCP (templates + optional deny hook)"
 CURSOR_DIR="$HOME/.cursor"
 MCP_JSON="$CURSOR_DIR/mcp.json"
@@ -290,6 +352,7 @@ command -v python3 >/dev/null 2>&1 && echo "  pip require-virtualenv:   $(python
 [[ -f "${DEST_CODEX:-}" ]]  && echo "  Codex managed settings:   installed" || echo "  Codex managed settings:   NOT installed"
 [[ -f "${DEST_HERMES:-}" ]] && echo "  Hermes managed scope:     installed" || echo "  Hermes managed scope:     NOT installed"
 [[ -x "${DEST_DIR_PI:-/etc/pi}/bash" && -f "${PI_EXT:-}" ]] && echo "  pi sandbox (0h):          installed (restart pi)" || echo "  pi sandbox (0h):          NOT installed"
+[[ -x "${DEST_DIR_CB:-/etc/codebuddy}/codebuddy" ]] && echo "  CodeBuddy sandbox (0i):   installed" || echo "  CodeBuddy sandbox (0i):   NOT installed"
 [[ -f "${MCP_PERMS:-}" ]]   && echo "  Cursor permissions.json:  present" || echo "  Cursor permissions.json:  not present"
 [[ -f "${MCP_JSON:-}" ]]     && echo "  Cursor mcp.json:            present" || echo "  Cursor mcp.json:            not present"
 printf '\nLoosen anything cumbersome via the LOOSEN notes above. See README.md.\n'
