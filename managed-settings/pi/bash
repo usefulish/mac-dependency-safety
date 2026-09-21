@@ -13,8 +13,26 @@ if [ ! -r "$PROFILE" ]; then
   echo "pi-sandbox: $PROFILE missing or unreadable — Layer 0h is fail-closed, command not run" >&2
   exit 126
 fi
-# HOME must be set: the profile derives every credential path from it.
-: "${HOME:?pi-sandbox: HOME is unset; refusing to run without a home directory to protect}"
+
+# The profile parameter HOME decides WHICH home's credentials are denied.
+# It is resolved from the directory service (the invoking user's real home),
+# NEVER from the environment: a caller that runs `HOME=/tmp/x /etc/pi/bash …`
+# must not be able to aim the deny set at a fake home while the command reads
+# the real one (same hardening as the Layer 0i CodeBuddy wrapper; a non-root
+# process cannot forge its uid, so `id -un` is trustworthy). The child's env
+# HOME is left untouched so user shell rc files keep behaving normally.
+SANDBOX_HOME="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+if [ -z "$SANDBOX_HOME" ] || [ ! -d "$SANDBOX_HOME" ]; then
+  # dscl is always present on macOS; if it somehow fails, the environment's
+  # HOME is the fallback — weaker (see above), but a missing home directory
+  # is a broken machine, not an attack.
+  if [ -z "${HOME:-}" ]; then
+    echo "pi-sandbox: could not resolve a home directory for $(id -un) — refusing to run without one to protect" >&2
+    exit 126
+  fi
+  SANDBOX_HOME="$HOME"
+fi
+
 # PI_SANDBOX_INNER_SHELL lets the extension honour a user `shellPath` setting;
 # whatever shell is chosen still runs inside the sandbox.
-exec /usr/bin/sandbox-exec -f "$PROFILE" -D HOME="$HOME" "${PI_SANDBOX_INNER_SHELL:-/bin/bash}" "$@"
+exec /usr/bin/sandbox-exec -f "$PROFILE" -D HOME="$SANDBOX_HOME" "${PI_SANDBOX_INNER_SHELL:-/bin/bash}" "$@"

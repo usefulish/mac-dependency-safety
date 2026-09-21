@@ -199,8 +199,12 @@ the tools pi already has, in two halves that are only useful together.
 
 **Root half — the wall.** A Seatbelt profile (the same `sandbox-exec` mechanism
 Codex and Antigravity use on macOS) denies reads of credential paths, and a
-wrapper runs every agent command under it. Because the kernel resolves the
-path, `cat ~/.config/../.ssh/id_rsa`, symlinks and `$(printf …)` tricks all
+wrapper runs every agent command under it. The wrapper resolves the sandboxed
+home from the directory service (`dscl . -read /Users/$(id -un)
+NFSHomeDirectory`), never from the environment — so `HOME=/tmp/x
+/etc/pi/bash …` cannot aim the deny set at a fake home while the command reads
+the real one (same hardening as the Layer 0i CodeBuddy wrapper). Because the
+kernel resolves the path, `cat ~/.config/../.ssh/id_rsa`, symlinks and `$(printf …)` tricks all
 fail the same way: `Operation not permitted`. Child processes inherit it.
 
 ```bash
@@ -283,6 +287,7 @@ Verify behaviourally, both directions, plus the Layer 1 interaction:
 /etc/pi/bash -c 'ls ~/.ssh'                    # expect: Operation not permitted
 /etc/pi/bash -c 'cat /etc/hosts'               # expect: success
 /etc/pi/bash -c 'npm config get ignore-scripts' # expect: same as outside (true)
+env HOME=/private/tmp/fakehome /etc/pi/bash -c "ls $HOME/.ssh"  # expect: Operation not permitted (wrapper ignores a faked env HOME)
 stat -f '%Su:%Sg %Lp' /etc/pi /etc/pi/*         # expect: root:wheel 755 (dir, bash) / 644 (sandbox.sb, ripgrep.conf)
 cmp ~/.pi/agent/extensions/dependency-safety.ts managed-settings/pi/dependency-safety.ts  # expect: silent
 bash verify-install.sh                          # Layer 0h section does all of the above

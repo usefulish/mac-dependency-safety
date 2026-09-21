@@ -483,6 +483,24 @@ if [[ -f "$PI_SANDBOX_PROFILE" && -x "$PI_SANDBOX_WRAPPER" && -f "$PI_SANDBOX_RG
     fi
   fi
 
+  # env-HOME mismatch defence (dscl-hardened wrapper): with a faked env HOME
+  # the deny set must still follow the directory-service home, so listing the
+  # REAL ~/.ssh must be denied. A legacy env-trusting wrapper aims -D HOME at
+  # the fake home and this probe reads the real ~/.ssh — reported as FAIL
+  # with the refresh command. The real path is expanded here, at probe
+  # construction time, so the child cannot redirect it via its own env.
+  if [[ -d "$HOME/.ssh" ]]; then
+    pi_mismatch_scratch="$(mktemp -d)"
+    pi_mismatch_out="$(env HOME="$pi_mismatch_scratch" "$PI_SANDBOX_WRAPPER" -c "ls '$HOME/.ssh'" 2>&1)"
+    pi_mismatch_rc=$?
+    rm -rf "$pi_mismatch_scratch"
+    if [[ "$pi_mismatch_rc" -ne 0 && "$pi_mismatch_out" == *"Operation not permitted"* ]]; then
+      pass "pi wrapper resolves the sandboxed home from the directory service (faked env HOME still denied)"
+    else
+      fail "pi wrapper trusts env HOME — 'HOME=<fake> /etc/pi/bash …' aims the deny set away from the real home (rc=$pi_mismatch_rc) — re-run harden-deps.sh to refresh /etc/pi/bash"
+    fi
+  fi
+
   # Claude Code auth path must stay DENIED (decision 2026-09-20, see the
   # REJECTED EXEMPTION block in managed-settings/pi/sandbox.sb): Claude Code
   # 2.1.278 authenticates through /usr/bin/security against
