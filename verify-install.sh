@@ -264,9 +264,9 @@ fi
 # DEBT, reported as WARN rather than FAIL. Set CURSOR_TEMP_WORKER=0 (or flip
 # the default) if Cursor becomes a permanent host — the checks revert to FAIL
 # until the layer is hardened.
-CURSOR_TEMP_WORKER=${CURSOR_TEMP_WORKER:-0}
+CURSOR_TEMP_WORKER=${CURSOR_TEMP_WORKER:-1}
 # Test/inspect the value (explicit 0/1 only) so a non-numeric env var does not silently select FAIL.
-case "${CURSOR_TEMP_WORKER:-0}" in
+case "$CURSOR_TEMP_WORKER" in
   0|1) : ;;
   *) echo "CURSOR_TEMP_WORKER must be 0 or 1, got: '$CURSOR_TEMP_WORKER'" >&2; exit 2 ;;
 esac
